@@ -4,12 +4,16 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using Newtonsoft.Json;
 using static Data.Models.Client.EFClient;
 
 namespace SharedLibraryCore.Configuration
 {
     public class ApplicationConfiguration : IBaseConfiguration
     {
+        [ConfigurationIgnore]
+        public CommunityInformationConfiguration CommunityInformation { get; set; } = new CommunityInformationConfiguration();
+            
         [LocalizedDisplayName("SETUP_ENABLE_WEBFRONT")]
         [ConfigurationLinked("WebfrontBindUrl", "ManualWebfrontUrl", "WebfrontPrimaryColor", "WebfrontSecondaryColor",
             "WebfrontCustomBranding")]
@@ -33,6 +37,9 @@ namespace SharedLibraryCore.Configuration
         [ConfigurationOptional]
         [LocalizedDisplayName("WEBFRONT_CONFIGURATION_CUSTOM_BRANDING")]
         public string WebfrontCustomBranding { get; set; }
+
+        [ConfigurationIgnore]
+        public WebfrontConfiguration Webfront { get; set; } = new WebfrontConfiguration();
 
         [LocalizedDisplayName("SETUP_ENABLE_MULTIOWN")]
         public bool EnableMultipleOwners { get; set; }
@@ -101,13 +108,16 @@ namespace SharedLibraryCore.Configuration
         public string ConnectionString { get; set; }
 
         [LocalizedDisplayName("WEBFRONT_CONFIGURATION_RCON_POLLRATE")]
-        public int RConPollRate { get; set; } = 5000;
+        public int RConPollRate { get; set; } = 8000;
 
         [LocalizedDisplayName("WEBFRONT_CONFIGURATION_MAX_TB")]
         public TimeSpan MaximumTempBanTime { get; set; } = new TimeSpan(24 * 30, 0, 0);
 
         [LocalizedDisplayName("WEBFRONT_CONFIGURATION_ENABLE_COLOR_CODES")]
         public bool EnableColorCodes { get; set; }
+
+        [ConfigurationIgnore] 
+        public string IngameAccentColorKey { get; set; } = "Cyan";
 
         [LocalizedDisplayName("WEBFRONT_CONFIGURATION_AUTOMESSAGE_PERIOD")]
         public int AutoMessagePeriod { get; set; }
@@ -134,11 +144,25 @@ namespace SharedLibraryCore.Configuration
             TimeSpan.FromDays(30)
         };
 
+        [ConfigurationIgnore]
         [LocalizedDisplayName("WEBFRONT_CONFIGURATION_PRESET_BAN_REASONS")]
         public Dictionary<string, string> PresetPenaltyReasons { get; set; } = new Dictionary<string, string>
             {{"afk", "Away from keyboard"}, {"ci", "Connection interrupted. Reconnect"}};
         [LocalizedDisplayName(("WEBFRONT_CONFIGURATION_ENABLE_PRIVILEGED_USER_PRIVACY"))]
         public bool EnablePrivilegedUserPrivacy { get; set; }
+
+        [ConfigurationIgnore]
+        public bool EnableImplicitAccountLinking { get; set; } = false;
+
+        [ConfigurationIgnore] 
+        public TimeSpan MaxClientHistoryTime { get; set; } = TimeSpan.FromHours(12);
+
+        [ConfigurationIgnore] 
+        public TimeSpan ServerDataCollectionInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+        public int ServerConnectionAttempts { get; set; } = 6;
+        
+        [ConfigurationIgnore]
         public Dictionary<Permission, string> OverridePermissionLevelNames { get; set; } = Enum
             .GetValues(typeof(Permission))
             .Cast<Permission>()
@@ -146,12 +170,16 @@ namespace SharedLibraryCore.Configuration
         [UIHint("ServerConfiguration")] 
         public ServerConfiguration[] Servers { get; set; }
 
+        [ConfigurationIgnore] public int MinimumNameLength { get; set; } = 3;
         [ConfigurationIgnore] public string Id { get; set; }
         [ConfigurationIgnore] public string SubscriptionId { get; set; }
+        [Obsolete("Moved to DefaultSettings")]
         [ConfigurationIgnore] public MapConfiguration[] Maps { get; set; }
+        [Obsolete("Moved to DefaultSettings")]
         [ConfigurationIgnore] public QuickMessageConfiguration[] QuickMessages { get; set; }
 
         [ConfigurationIgnore]
+        [JsonIgnore]
         public string WebfrontUrl => string.IsNullOrEmpty(ManualWebfrontUrl)
             ? WebfrontBindUrl?.Replace("0.0.0.0", "127.0.0.1")
             : ManualWebfrontUrl;

@@ -3,14 +3,18 @@ using SharedLibraryCore;
 using SharedLibraryCore.Dtos;
 using SharedLibraryCore.Interfaces;
 using System.Linq;
+using Data.Models.Client.Stats;
+using SharedLibraryCore.Configuration;
 
 namespace WebfrontCore.Controllers
 {
     public class ServerController : BaseController
     {
-        public ServerController(IManager manager) : base(manager)
+        private readonly DefaultSettings _defaultSettings;
+        
+        public ServerController(IManager manager, DefaultSettings defaultSettings) : base(manager)
         {
-
+            _defaultSettings = defaultSettings;
         }
 
         [HttpGet]
@@ -30,16 +34,17 @@ namespace WebfrontCore.Controllers
                 ID = s.EndPoint,
                 Port = s.Port,
                 Map = s.CurrentMap.Alias,
-                ClientCount = s.ClientNum,
+                ClientCount = s.Clients.Count(client => client != null),
                 MaxClients = s.MaxClients,
-                GameType = s.Gametype,
+                GameType =  s.GametypeName,
                 Players = s.GetClientsAsList()
                 .Select(p => new PlayerInfo
                 {
                     Name = p.Name,
                     ClientId = p.ClientId,
                     Level = p.Level.ToLocalizedLevelName(),
-                    LevelInt = (int)p.Level
+                    LevelInt = (int)p.Level,
+                    ZScore = p.GetAdditionalProperty<EFClientStatistics>(IW4MAdmin.Plugins.Stats.Helpers.StatManager.CLIENT_STATS_KEY)?.ZScore
                 }).ToList(),
                 ChatHistory = s.ChatHistory.ToList(),
                 PlayerHistory = s.ClientHistory.ToArray(),

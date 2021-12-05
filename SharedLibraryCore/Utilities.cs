@@ -1,5 +1,4 @@
-﻿
-using Humanizer;
+﻿using Humanizer;
 using Humanizer.Localisation;
 using SharedLibraryCore.Database.Models;
 using SharedLibraryCore.Dtos.Meta;
@@ -22,6 +21,7 @@ using static SharedLibraryCore.Server;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 using static Data.Models.Client.EFClient;
 using Data.Models;
+using SharedLibraryCore.Formatting;
 using static Data.Models.EFPenalty;
 
 namespace SharedLibraryCore
@@ -179,6 +179,24 @@ namespace SharedLibraryCore
         /// <returns></returns>
         public static string FixIW4ForwardSlash(this string str) => str.Replace("//", "/ /");
 
+        public static string FormatMessageForEngine(this string str, ColorCodeMapping mapping)
+        {
+            if (mapping == null || string.IsNullOrEmpty(str))
+            {
+                return str;
+            }
+
+            var output = str;
+            var colorCodeMatches = Regex.Matches(output, @"\(Color::(.{1,16})\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+            foreach (var match in colorCodeMatches.Where(m => m.Success))
+            {
+                var key = match.Groups[1].ToString();
+                output = output.Replace(match.Value, mapping.TryGetValue(key, out var code) ? code : "");
+            }
+
+            return output.FixIW4ForwardSlash() + mapping[ColorCodes.White.ToString()];
+        }
+
         private static readonly IList<string> _zmGameTypes = new[] { "zclassic", "zstandard", "zcleansed", "zgrief" };
         /// <summary>
         /// indicates if the given server is running a zombie game mode
@@ -187,37 +205,28 @@ namespace SharedLibraryCore
         /// <returns></returns>
         public static bool IsZombieServer(this Server server) => server.GameName == Game.T6 && _zmGameTypes.Contains(server.Gametype.ToLower());
 
+        public static bool IsCodGame(this Server server) => server.RconParser?.RConEngine == "COD";
+
         /// <summary>
-        /// Get the IW Engine color code corresponding to an admin level
+        /// Get the color key corresponding to a given user level
         /// </summary>
         /// <param name="level">Specified player level</param>
+        /// <param name="localizedLevel"></param>
         /// <returns></returns>
-        public static String ConvertLevelToColor(EFClient.Permission level, string localizedLevel)
+        public static string ConvertLevelToColor(Permission level, string localizedLevel)
         {
-            char colorCode = '6';
-            // todo: maybe make this game independant?
-            switch (level)
+            // todo: make configurable
+            var colorCode = level switch
             {
-                case EFClient.Permission.Banned:
-                    colorCode = '1';
-                    break;
-                case EFClient.Permission.Flagged:
-                    colorCode = '9';
-                    break;
-                case EFClient.Permission.Owner:
-                    colorCode = '5';
-                    break;
-                case EFClient.Permission.User:
-                    colorCode = '2';
-                    break;
-                case EFClient.Permission.Trusted:
-                    colorCode = '3';
-                    break;
-                default:
-                    break;
-            }
+                Permission.Banned => "Red",
+                Permission.Flagged => "Map",
+                Permission.Owner => "Accent",
+                Permission.User => "Yellow",
+                Permission.Trusted => "Green",
+                _ => "Pink"
+            };
 
-            return $"^{colorCode}{localizedLevel ?? level.ToString()}";
+            return $"(Color::{colorCode}){localizedLevel ?? level.ToString()}";
         }
 
         public static string ToLocalizedLevelName(this Permission permission)
@@ -323,7 +332,16 @@ namespace SharedLibraryCore
         public static long ConvertGuidToLong(this string str, NumberStyles numberStyle, long? fallback = null)
         {
             // added for source games that provide the steam ID
-            str = str.Replace("STEAM_1", "").Replace(":", "");
+            var match = Regex.Match(str, @"^STEAM_(\d):(\d):(\d+)$");
+            if (match.Success)
+            {
+                var x = int.Parse(match.Groups[1].ToString());
+                var y = int.Parse(match.Groups[2].ToString());
+                var z = long.Parse(match.Groups[3].ToString());
+
+                return z * 2 + 0x0110000100000000 + y;
+            }
+   
             str = str.Substring(0, Math.Min(str.Length, 19));
             var parsableAsNumber = Regex.Match(str, @"([A-F]|[a-f]|[0-9])+").Value;
 
@@ -536,7 +554,7 @@ namespace SharedLibraryCore
         /// <param name="description">description of the question's value</param>
         /// <param name="defaultValue">default value to set if no input is entered</param>
         /// <returns></returns>
-        public static bool PromptBool(string question, string description = null, bool defaultValue = true)
+        public static bool PromptBool(this string question, string description = null, bool defaultValue = true)
         {
             Console.Write($"{question}?{(string.IsNullOrEmpty(description) ? " " : $" ({description}) ")}[y/n]: ");
             char response = Console.ReadLine().ToLower().FirstOrDefault();
@@ -552,7 +570,7 @@ namespace SharedLibraryCore
         /// <param name="description">description of the question's value</param>
         /// <param name="selections">array of possible selections (should be able to convert to string)</param>
         /// <returns></returns>
-        public static Tuple<int, T> PromptSelection<T>(string question, T defaultValue, string description = null, params T[] selections)
+        public static Tuple<int, T> PromptSelection<T>(this string question, T defaultValue, string description = null, params T[] selections)
         {
             bool hasDefault = false;
 
@@ -624,7 +642,7 @@ namespace SharedLibraryCore
         /// <param name="description">description of the question's value</param>
         /// <param name="defaultValue">default value to set the return value to</param>
         /// <returns></returns>
-        public static string PromptString(string question, string description = null, string defaultValue = null)
+        public static string PromptString(this string question, string description = null, string defaultValue = null)
         {
             string inputOrDefault()
             {
@@ -917,6 +935,18 @@ namespace SharedLibraryCore
             }
         }
 
+        public static async Task<T> WithTimeout<T>(this Task<T> task, TimeSpan timeout)
+        { 
+             await Task.WhenAny(task, Task.Delay(timeout));
+             return await task;
+        }
+        
+        public static async Task WithTimeout(this Task task, TimeSpan timeout)
+        { 
+            await Task.WhenAny(task, Task.Delay(timeout));
+        }
+        
+
         public static bool ShouldHideLevel(this Permission perm) => perm == Permission.Flagged;
 
         /// <summary>
@@ -1048,6 +1078,31 @@ namespace SharedLibraryCore
         public static string ToNumericalString(this double? value, int precision = 0)
         {
             return value?.ToNumericalString(precision);
+        }
+
+        public static string[] FragmentMessageForDisplay(this string message)
+        {
+            var messages = new List<string>();
+            var length = 48;
+
+            if (message.Length <= length)
+            {
+                return new[] {message};
+            }
+            int i;
+            for (i = 0; i < message.Length - length; i += length)
+            {
+                messages.Add(new string(message.Skip(i).Take(length).ToArray()));
+            }
+
+            var left = message.Length - length;
+
+            if (left > 0)
+            {
+                messages.Add(new string(message.Skip(i).Take(left).ToArray()));
+            }
+
+            return messages.ToArray();
         }
 
         public static string FindRuleForReason(this string reason, ApplicationConfiguration appConfig, Server server)

@@ -7,6 +7,7 @@ using Data.Models;
 using Data.Models.Client;
 using Data.Models.Client.Stats;
 using Data.Models.Client.Stats.Reference;
+using Data.Models.Misc;
 using Data.Models.Server;
 
 namespace Data.Context
@@ -35,6 +36,14 @@ namespace Data.Context
         public DbSet<EFWeapon> Weapons { get; set; }
         public DbSet<EFWeaponAttachment> WeaponAttachments { get; set; }
         public DbSet<EFMap> Maps { get; set; }
+        
+        #endregion
+
+        #region MISC
+
+        public DbSet<EFInboxMessage> InboxMessages { get; set; }
+        public DbSet<EFServerSnapshot> ServerSnapshots { get;set; }
+        public DbSet<EFClientConnectionHistory> ConnectionHistory { get; set; }
 
         #endregion
 
@@ -121,11 +130,15 @@ namespace Data.Context
                     .OnDelete(DeleteBehavior.SetNull);
             });
 
+            modelBuilder.Entity<EFClientConnectionHistory>(ent => ent.HasIndex(history => history.CreatedDateTime));
+
             // force full name for database conversion
             modelBuilder.Entity<EFClient>().ToTable("EFClients");
             modelBuilder.Entity<EFAlias>().ToTable("EFAlias");
             modelBuilder.Entity<EFAliasLink>().ToTable("EFAliasLinks");
             modelBuilder.Entity<EFPenalty>().ToTable("EFPenalties");
+            modelBuilder.Entity<EFServerSnapshot>().ToTable(nameof(EFServerSnapshot));
+            modelBuilder.Entity<EFClientConnectionHistory>().ToTable(nameof(EFClientConnectionHistory));
 
             Models.Configuration.StatsModelConfiguration.Configure(modelBuilder);
 

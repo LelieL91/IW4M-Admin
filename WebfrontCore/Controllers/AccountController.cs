@@ -4,8 +4,10 @@ using Microsoft.AspNetCore.Mvc;
 using SharedLibraryCore;
 using SharedLibraryCore.Interfaces;
 using System;
+using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 
 namespace WebfrontCore.Controllers
 {
@@ -50,6 +52,16 @@ namespace WebfrontCore.Controllers
                     var claimsIdentity = new ClaimsIdentity(claims, "login");
                     var claimsPrinciple = new ClaimsPrincipal(claimsIdentity);
                     await SignInAsync(claimsPrinciple);
+                    
+                    Manager.AddEvent(new GameEvent()
+                    {
+                        Origin = privilegedClient,
+                        Type = GameEvent.EventType.Login,
+                        Owner = Manager.GetServers().First(),
+                        Data = HttpContext.Request.Headers.ContainsKey("X-Forwarded-For") 
+                            ? HttpContext.Request.Headers["X-Forwarded-For"].ToString() 
+                            : HttpContext.Connection.RemoteIpAddress.ToString()
+                    });
 
                     return Ok();
                 }
@@ -66,6 +78,19 @@ namespace WebfrontCore.Controllers
         [HttpGet]
         public async Task<IActionResult> LogoutAsync()
         {
+            if (Authorized)
+            {
+                Manager.AddEvent(new GameEvent()
+                {
+                    Origin = Client,
+                    Type = GameEvent.EventType.Logout,
+                    Owner = Manager.GetServers().First(),
+                    Data = HttpContext.Request.Headers.ContainsKey("X-Forwarded-For") 
+                        ? HttpContext.Request.Headers["X-Forwarded-For"].ToString() 
+                        : HttpContext.Connection.RemoteIpAddress.ToString()
+                });
+            }
+
             await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             return RedirectToAction("Index", "Home");
         }

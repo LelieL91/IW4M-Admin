@@ -3,7 +3,7 @@ var eventParser;
 
 var plugin = {
     author: 'RaidMax, Xerxes',
-    version: 0.10,
+    version: 1.2,
     name: 'Plutonium T6 Parser',
     isParser: true,
 
@@ -27,6 +27,8 @@ var plugin = {
         rconParser.Configuration.Dvar.AddMapping(107, 2);
         rconParser.Configuration.WaitForResponse = false;
         rconParser.Configuration.NoticeLineSeparator = '. ';
+        rconParser.Configuration.DefaultRConPort = 4976;
+        rconParser.Configuration.DefaultInstallationDirectoryHint = '{LocalAppData}/Plutonium/storage/t6';
 
         rconParser.Configuration.StatusHeader.Pattern = 'num +score +bot +ping +guid +name +lastmsg +address +qport +rate *';
         rconParser.Configuration.Status.Pattern = '^ *([0-9]+) +([0-9]+) +(?:[0-1]{1}) +([0-9]+) +([A-F0-9]+|0) +(.+?) +(?:[0-9]+) +(\\d+\\.\\d+\\.\\d+\\.\\d+\\:-?\\d{1,5}|0+\\.0+:-?\\d{1,5}|loopback) +(?:-?[0-9]+) +(?:[0-9]+) *$';
@@ -36,8 +38,23 @@ var plugin = {
         rconParser.Configuration.Status.AddMapping(103, 4);
         rconParser.Configuration.Status.AddMapping(104, 5);
         rconParser.Configuration.Status.AddMapping(105, 6);
+
+        // this is mostly default but just an example on how to map
+        rconParser.Configuration.ColorCodeMapping.Clear();
+        rconParser.Configuration.ColorCodeMapping.Add('Black', '^0');
+        rconParser.Configuration.ColorCodeMapping.Add('Red', '^1');
+        rconParser.Configuration.ColorCodeMapping.Add('Green', '^2');
+        rconParser.Configuration.ColorCodeMapping.Add('Yellow', '^3');
+        rconParser.Configuration.ColorCodeMapping.Add('Blue', '^4');
+        rconParser.Configuration.ColorCodeMapping.Add('Cyan', '^5');
+        rconParser.Configuration.ColorCodeMapping.Add('Pink', '^6');
+        rconParser.Configuration.ColorCodeMapping.Add('White', '^7');
+        rconParser.Configuration.ColorCodeMapping.Add('Map', '^8');
+        rconParser.Configuration.ColorCodeMapping.Add('Grey', '^9');
+        rconParser.Configuration.ColorCodeMapping.Add('LightBlue', '^;');
+        rconParser.Configuration.ColorCodeMapping.Add('LightYellow', '^:');
         
-        eventParser.Configuration.GameDirectory = 't6';
+        eventParser.Configuration.GameDirectory = '';
         eventParser.Configuration.GuidNumberStyle = 7; // Integer
 
         rconParser.Version = 'Call of Duty Multiplayer - Ship COD_T6_S MP build 1.0.44 CL(1759941) CODPCAB2 CEG Fri May 9 19:19:19 2014 win-x86 813e66d5';

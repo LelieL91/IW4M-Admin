@@ -15,6 +15,7 @@ using Serilog.Context;
 using static Data.Models.Client.EFClient;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 using Data.Models;
+using SharedLibraryCore.Configuration;
 
 namespace SharedLibraryCore.Services
 {
@@ -22,21 +23,30 @@ namespace SharedLibraryCore.Services
     {
         private readonly IDatabaseContextFactory _contextFactory;
         private readonly ILogger _logger;
+        private readonly ApplicationConfiguration _appConfig;
 
-        public ClientService(ILogger<ClientService> logger, IDatabaseContextFactory databaseContextFactory)
+        public ClientService(ILogger<ClientService> logger, IDatabaseContextFactory databaseContextFactory, 
+            ApplicationConfiguration appConfig)
         {
             _contextFactory = databaseContextFactory;
             _logger = logger;
+            _appConfig = appConfig;
         }
 
         public async Task<EFClient> Create(EFClient entity)
         {
+            entity.Name = entity.Name.CapClientName(EFAlias.MAX_NAME_LENGTH);
+            
+            if (!_appConfig.EnableImplicitAccountLinking)
+            {
+                return await HandleNewCreate(entity);
+            }
+            
             await using var context = _contextFactory.CreateContext(true);
             using (LogContext.PushProperty("Server", entity?.CurrentServer?.ToString()))
             {
                 int? linkId = null;
                 int? aliasId = null;
-                entity.Name = entity.Name.CapClientName(EFAlias.MAX_NAME_LENGTH);
 
                 if (entity.IPAddress != null)
                 {
@@ -116,6 +126,55 @@ namespace SharedLibraryCore.Services
                 context.Clients.Add(client);
                 await context.SaveChangesAsync();
 
+                return client;
+            }
+        }
+
+        private async Task<EFClient> HandleNewCreate(EFClient entity)
+        {
+            await using var context = _contextFactory.CreateContext(true);
+            using (LogContext.PushProperty("Server", entity.CurrentServer?.ToString()))
+            {
+                var existingAlias = await context.Aliases
+                    .Select(alias => new {alias.AliasId, alias.LinkId, alias.IPAddress, alias.Name})
+                    .Where(alias => alias.IPAddress != null && alias.IPAddress == entity.IPAddress && 
+                                    alias.Name == entity.Name)
+                    .FirstOrDefaultAsync();
+
+                var client = new EFClient
+                {
+                    Level = Permission.User,
+                    FirstConnection = DateTime.UtcNow,
+                    LastConnection = DateTime.UtcNow,
+                    NetworkId = entity.NetworkId
+                };
+                
+                if (existingAlias == null)
+                {
+                    _logger.LogDebug("[{Method}] creating new Link and Alias for {Entity}", nameof(HandleNewCreate), entity.ToString());
+                    var link = new EFAliasLink();
+                    var alias = new EFAlias()
+                    {
+                        Name = entity.Name,
+                        SearchableName = entity.Name.StripColors().ToLower(),
+                        DateAdded = DateTime.UtcNow,
+                        IPAddress = entity.IPAddress,
+                        Link = link
+                    };
+                    client.CurrentAlias = alias;
+                    client.AliasLink = link;
+                }
+
+                else
+                {
+                    _logger.LogDebug("[{Method}] associating new GUID {Guid} with existing alias id {aliasId} for {Entity}", 
+                        nameof(HandleNewCreate), entity.GuidString, existingAlias.AliasId, entity.ToString());
+                    client.CurrentAliasId = existingAlias.AliasId;
+                    client.AliasLinkId = existingAlias.LinkId;
+                }
+                
+                context.Clients.Add(client);
+                await context.SaveChangesAsync();
                 return client;
             }
         }
@@ -257,6 +316,54 @@ namespace SharedLibraryCore.Services
             }
         }
 
+        private async Task UpdateAliasNew(string originalName, int? ip, Data.Models.Client.EFClient entity,
+            DatabaseContext context)
+        {
+            var name = originalName.CapClientName(EFAlias.MAX_NAME_LENGTH);
+    
+            var existingAliases = await context.Aliases
+                .Where(alias => alias.Name == name && alias.LinkId == entity.AliasLinkId || 
+                                alias.Name == name && alias.IPAddress != null && alias.IPAddress == ip)
+                .ToListAsync();
+            var defaultAlias = existingAliases.FirstOrDefault(alias => alias.IPAddress == null);
+            var existingExactAlias =
+                existingAliases.FirstOrDefault(alias => alias.IPAddress != null && alias.IPAddress == ip);
+
+            if (defaultAlias != null && existingExactAlias == null)
+            {
+                defaultAlias.IPAddress = ip;
+                entity.CurrentAlias = defaultAlias;
+                entity.CurrentAliasId = defaultAlias.AliasId;
+                await context.SaveChangesAsync();
+                return;
+            }
+
+            if (existingExactAlias != null)
+            {
+                entity.CurrentAlias = existingExactAlias;
+                entity.CurrentAliasId = existingExactAlias.AliasId;
+                await context.SaveChangesAsync();
+                _logger.LogDebug("[{Method}] client {Client} already has an existing exact alias, so we are not making changes", nameof(UpdateAliasNew), entity.ToString());
+                return;
+            }
+            
+            _logger.LogDebug("[{Method}] {Entity} is using a new alias", nameof(UpdateAliasNew), entity.ToString());
+
+            var newAlias = new EFAlias()
+            {
+                DateAdded = DateTime.UtcNow,
+                IPAddress = ip,
+                LinkId = entity.AliasLinkId,
+                Name = name,
+                SearchableName = name.StripColors().ToLower(),
+                Active = true,
+            };
+
+            entity.CurrentAlias = newAlias;
+            await context.SaveChangesAsync();
+            entity.CurrentAliasId = newAlias.AliasId;
+        }
+
         /// <summary>
         /// updates the permission level of the given target to the given permission level
         /// </summary>
@@ -289,9 +396,19 @@ namespace SharedLibraryCore.Services
                     var iqMatchingClients = ctx.Clients
                         .Where(_client => _client.AliasLinkId == entity.AliasLinkId);
 
+                    var iqLinkClients = new List<Data.Models.Client.EFClient>().AsQueryable();
+                    if (!_appConfig.EnableImplicitAccountLinking)
+                    {
+                        var linkIds = await ctx.Aliases.Where(alias =>
+                                alias.IPAddress != null && alias.IPAddress == temporalClient.IPAddress)
+                            .Select(alias => alias.LinkId)
+                            .ToListAsync();
+                        iqLinkClients = ctx.Clients.Where(client => linkIds.Contains(client.AliasLinkId));
+                    }
+
                     // this updates the level for all the clients with the same LinkId
                     // only if their new level is flagged or banned
-                    await iqMatchingClients.ForEachAsync(_client =>
+                    await iqMatchingClients.Union(iqLinkClients).ForEachAsync(_client =>
                     {
                         _client.Level = newPermission;
                         _logger.LogInformation("Updated linked {clientId} to {newPermission}", _client.ClientId,
@@ -421,7 +538,15 @@ namespace SharedLibraryCore.Services
                 .Include(c => c.CurrentAlias)
                 .First(e => e.ClientId == temporalClient.ClientId);
 
-            await UpdateAlias(temporalClient.Name, temporalClient.IPAddress, entity, context);
+            if (_appConfig.EnableImplicitAccountLinking)
+            {
+                await UpdateAlias(temporalClient.Name, temporalClient.IPAddress, entity, context);
+            }
+
+            else
+            {
+                await UpdateAliasNew(temporalClient.Name, temporalClient.IPAddress, entity, context);
+            }
 
             temporalClient.CurrentAlias = entity.CurrentAlias;
             temporalClient.CurrentAliasId = entity.CurrentAliasId;
@@ -548,7 +673,7 @@ namespace SharedLibraryCore.Services
         public async Task<IList<PlayerInfo>> FindClientsByIdentifier(string identifier)
         {
             var trimmedIdentifier = identifier?.Trim();
-            if (trimmedIdentifier?.Length < 3)
+            if (trimmedIdentifier?.Length < _appConfig.MinimumNameLength)
             {
                 return new List<PlayerInfo>();
             }
@@ -586,16 +711,20 @@ namespace SharedLibraryCore.Services
                 .Where(_client => _client.Active);
 
 
-            iqClients = iqClients.Where(_client => networkId == _client.NetworkId || linkIds.Contains(_client.AliasLinkId));
+            iqClients = iqClients.Where(_client => networkId == _client.NetworkId || linkIds.Contains(_client.AliasLinkId) 
+                || !_appConfig.EnableImplicitAccountLinking && _client.CurrentAlias.IPAddress != null && _client.CurrentAlias.IPAddress == ipAddress);
 
             // we want to project our results 
             var iqClientProjection = iqClients.OrderByDescending(_client => _client.LastConnection)
-                .Select(_client => new PlayerInfo()
+                .Select(_client => new PlayerInfo
                 {
                     Name = _client.CurrentAlias.Name,
-                    LevelInt = (int)_client.Level,
+                    LevelInt = (int) _client.Level,
                     LastConnection = _client.LastConnection,
                     ClientId = _client.ClientId,
+                    IPAddress = _client.CurrentAlias.IPAddress.HasValue
+                        ? _client.CurrentAlias.IPAddress.Value.ToString()
+                        : ""
                 });
 
             var clients = await iqClientProjection.ToListAsync();
@@ -715,6 +844,24 @@ namespace SharedLibraryCore.Services
 
             await ctx.Aliases.Where(_alias => _alias.IPAddress == client.CurrentAlias.IPAddress && _alias.IPAddress != null)
                 .ForEachAsync(_alias => _alias.LinkId = newLink.AliasLinkId);
+
+            if (!_appConfig.EnableImplicitAccountLinking)
+            {
+                var clientIdsByIp = await ctx.Clients.Where(c =>
+                        client.CurrentAlias.IPAddress != null &&
+                        c.CurrentAlias.IPAddress == client.CurrentAlias.IPAddress)
+                    .Select(c => c.ClientId)
+                    .ToListAsync();
+
+                await ctx.Penalties.Where(penalty =>
+                        clientIdsByIp.Contains(penalty.OffenderId)
+                        && new[]
+                        {
+                            EFPenalty.PenaltyType.Ban, EFPenalty.PenaltyType.TempBan, EFPenalty.PenaltyType.Flag
+                        }.Contains(penalty.Type)
+                        && penalty.Expires == null)
+                    .ForEachAsync(penalty => penalty.Expires = DateTime.UtcNow);
+            }
 
             await ctx.SaveChangesAsync();
         }

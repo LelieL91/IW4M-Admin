@@ -21,6 +21,7 @@ using Data.Models.Server;
 using Humanizer.Localisation;
 using Microsoft.Extensions.Logging;
 using Stats.Client.Abstractions;
+using Stats.Config;
 using Stats.Helpers;
 using static IW4MAdmin.Plugins.Stats.Cheat.Detection;
 using EFClient = SharedLibraryCore.Database.Models.EFClient;
@@ -38,6 +39,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
         private static List<EFServer> serverModels;
         public static string CLIENT_STATS_KEY = "ClientStats";
         public static string CLIENT_DETECTIONS_KEY = "ClientDetections";
+        public static string ESTIMATED_SCORE = "EstimatedScore";
         private readonly SemaphoreSlim _addPlayerWaiter = new SemaphoreSlim(1, 1);
         private readonly IServerDistributionCalculator _serverDistributionCalculator;
 
@@ -112,19 +114,33 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
             return 0;
         }
 
+        public Expression<Func<EFClientRankingHistory, bool>> GetNewRankingFunc(int? clientId = null, long? serverId = null)
+        {
+            return (ranking) => ranking.ServerId == serverId
+                                && ranking.Client.Level != Data.Models.Client.EFClient.Permission.Banned
+                                && ranking.Client.LastConnection >= Extensions.FifteenDaysAgo()
+                                && ranking.ZScore != null
+                                && ranking.PerformanceMetric != null
+                                && ranking.Newest
+                                && ranking.Client.TotalConnectionTime >=
+                                _configHandler.Configuration().TopPlayersMinPlayTime;
+        }
+
+        public async Task<int> GetTotalRankedPlayers(long serverId)
+        {
+            await using var context = _contextFactory.CreateContext(enableTracking: false);
+
+            return await context.Set<EFClientRankingHistory>()
+                .Where(GetNewRankingFunc(serverId: serverId))
+                .CountAsync();
+        }
+
         public async Task<List<TopStatsInfo>> GetNewTopStats(int start, int count, long? serverId = null)
         {
             await using var context = _contextFactory.CreateContext(false);
 
             var clientIdsList = await context.Set<EFClientRankingHistory>()
-                .Where(ranking => ranking.ServerId == serverId)
-                .Where(ranking => ranking.Client.Level != Data.Models.Client.EFClient.Permission.Banned)
-                .Where(ranking => ranking.Client.LastConnection >= Extensions.FifteenDaysAgo())
-                .Where(ranking => ranking.ZScore != null)
-                .Where(ranking => ranking.PerformanceMetric != null)
-                .Where(ranking => ranking.Newest)
-                .Where(ranking =>
-                    ranking.Client.TotalConnectionTime >= _configHandler.Configuration().TopPlayersMinPlayTime)
+                .Where(GetNewRankingFunc(serverId: serverId))
                 .OrderByDescending(ranking => ranking.PerformanceMetric)
                 .Select(ranking => ranking.ClientId)
                 .Skip(start)
@@ -163,6 +179,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                     KDR = s.Sum(c => (c.Kills / (double) (c.Deaths == 0 ? 1 : c.Deaths)) * c.TimePlayed) /
                           s.Sum(c => c.TimePlayed),
                     TotalTimePlayed = s.Sum(c => c.TimePlayed),
+                    UpdatedAt = s.Max(c => c.UpdatedAt)
                 })
                 .ToListAsync();
 
@@ -175,9 +192,9 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                 Deaths = s.Deaths,
                 Kills = s.Kills,
                 KDR = Math.Round(s.KDR, 2),
-                LastSeen = (DateTime.UtcNow - rankingsDict[s.ClientId].First().LastConnection)
+                LastSeen = (DateTime.UtcNow - (s.UpdatedAt ?? rankingsDict[s.ClientId].Last().LastConnection))
                     .HumanizeForCurrentCulture(1, TimeUnit.Week, TimeUnit.Second, ",", false),
-                LastSeenValue = (DateTime.UtcNow - rankingsDict[s.ClientId].First().LastConnection),
+                LastSeenValue = DateTime.UtcNow - (s.UpdatedAt ?? rankingsDict[s.ClientId].Last().LastConnection),
                 Name = rankingsDict[s.ClientId].First().Name,
                 Performance = Math.Round(rankingsDict[s.ClientId].Last().PerformanceMetric ?? 0, 2),
                 RatingChange = (rankingsDict[s.ClientId].First().Ranking -
@@ -533,7 +550,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
             // sync their stats before they leave
             if (clientStats != null)
             {
-                clientStats = UpdateStats(clientStats);
+                clientStats = UpdateStats(clientStats, pl);
                 await SaveClientStats(clientStats);
                 if (_configHandler.Configuration().EnableAdvancedMetrics)
                 {
@@ -609,7 +626,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                     DeathType = (int) ParseEnum<IW4Info.MeansOfDeath>.Get(type, typeof(IW4Info.MeansOfDeath)),
                     Damage = int.Parse(damage),
                     HitLoc = (int) ParseEnum<IW4Info.HitLocation>.Get(hitLoc, typeof(IW4Info.HitLocation)),
-                    Weapon = (int) ParseEnum<IW4Info.WeaponName>.Get(weapon, typeof(IW4Info.WeaponName)),
+                    WeaponReference = weapon,
                     ViewAngles = vViewAngles,
                     TimeOffset = long.Parse(offset),
                     When = time,
@@ -624,6 +641,8 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                     TimeSinceLastAttack = long.Parse(lastAttackTime),
                     GameName = (int) attacker.CurrentServer.GameName
                 };
+                
+                hit.SetAdditionalProperty("HitLocationReference", hitLoc);
 
                 if (hit.HitLoc == (int) IW4Info.HitLocation.shield)
                 {
@@ -859,7 +878,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
 
             // update the total stats
             _servers[serverId].ServerStatistics.TotalKills += 1;
-
+            
             // this happens when the round has changed
             if (attackerStats.SessionScore == 0)
             {
@@ -871,18 +890,28 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                 victimStats.LastScore = 0;
             }
 
-            attackerStats.SessionScore = attacker.Score;
-            victimStats.SessionScore = victim.Score;
+            var estimatedAttackerScore = attacker.CurrentServer.GameName != Server.Game.CSGO
+                ? attacker.Score 
+                : attackerStats.SessionKills * 50;
+            var estimatedVictimScore = attacker.CurrentServer.GameName != Server.Game.CSGO  
+                ? victim.Score 
+                : victimStats.SessionKills * 50;
+
+            attackerStats.SessionScore = estimatedAttackerScore;
+            victimStats.SessionScore = estimatedVictimScore;
+
+            attacker.SetAdditionalProperty(ESTIMATED_SCORE, estimatedAttackerScore);
+            victim.SetAdditionalProperty(ESTIMATED_SCORE, estimatedVictimScore);
 
             // calculate for the clients
-            CalculateKill(attackerStats, victimStats);
+            CalculateKill(attackerStats, victimStats, attacker, victim);
             // this should fix the negative SPM
             // updates their last score after being calculated
-            attackerStats.LastScore = attacker.Score;
-            victimStats.LastScore = victim.Score;
+            attackerStats.LastScore = estimatedAttackerScore;
+            victimStats.LastScore = estimatedVictimScore;
 
             // show encouragement/discouragement
-            string streakMessage = (attackerStats.ClientId != victimStats.ClientId)
+            var streakMessage = (attackerStats.ClientId != victimStats.ClientId)
                 ? StreakMessage.MessageOnStreak(attackerStats.KillStreak, attackerStats.DeathStreak)
                 : StreakMessage.MessageOnStreak(-1, -1);
 
@@ -1227,7 +1256,8 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
         /// </summary>
         /// <param name="attackerStats">Stats of the attacker</param>
         /// <param name="victimStats">Stats of the victim</param>
-        public void CalculateKill(EFClientStatistics attackerStats, EFClientStatistics victimStats)
+        public void CalculateKill(EFClientStatistics attackerStats, EFClientStatistics victimStats, 
+            EFClient attacker, EFClient victim)
         {
             bool suicide = attackerStats.ClientId == victimStats.ClientId;
 
@@ -1246,43 +1276,12 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
             victimStats.KillStreak = 0;
 
             // process the attacker's stats after the kills
-            attackerStats = UpdateStats(attackerStats);
-
-            #region DEPRECATED
-
-            /* var validAttackerLobbyRatings = Servers[attackerStats.ServerId].PlayerStats
-                 .Where(cs => cs.Value.ClientId != attackerStats.ClientId)
-                 .Where(cs =>
-                     Servers[attackerStats.ServerId].IsTeamBased ?
-                     cs.Value.Team != attackerStats.Team :
-                     cs.Value.Team != IW4Info.Team.Spectator)
-                 .Where(cs => cs.Value.Team != IW4Info.Team.Spectator);
-
-             double attackerLobbyRating = validAttackerLobbyRatings.Count() > 0 ?
-                 validAttackerLobbyRatings.Average(cs => cs.Value.EloRating) :
-                 attackerStats.EloRating;
-
-             var validVictimLobbyRatings = Servers[victimStats.ServerId].PlayerStats
-                 .Where(cs => cs.Value.ClientId != victimStats.ClientId)
-                 .Where(cs =>
-                     Servers[attackerStats.ServerId].IsTeamBased ?
-                     cs.Value.Team != victimStats.Team :
-                     cs.Value.Team != IW4Info.Team.Spectator)
-                  .Where(cs => cs.Value.Team != IW4Info.Team.Spectator);
-
-             double victimLobbyRating = validVictimLobbyRatings.Count() > 0 ?
-                 validVictimLobbyRatings.Average(cs => cs.Value.EloRating) :
-                 victimStats.EloRating;*/
-
-            #endregion
+            attackerStats = UpdateStats(attackerStats, attacker);
 
             // calculate elo
-            double attackerEloDifference = Math.Log(Math.Max(1, victimStats.EloRating)) -
+            var attackerEloDifference = Math.Log(Math.Max(1, victimStats.EloRating)) -
                                            Math.Log(Math.Max(1, attackerStats.EloRating));
-            double winPercentage = 1.0 / (1 + Math.Pow(10, attackerEloDifference / Math.E));
-
-            // double victimEloDifference = Math.Log(Math.Max(1, attackerStats.EloRating)) - Math.Log(Math.Max(1, victimStats.EloRating));
-            // double lossPercentage = 1.0 / (1 + Math.Pow(10, victimEloDifference/ Math.E));
+            var winPercentage = 1.0 / (1 + Math.Pow(10, attackerEloDifference / Math.E));
 
             attackerStats.EloRating += 6.0 * (1 - winPercentage);
             victimStats.EloRating -= 6.0 * (1 - winPercentage);
@@ -1302,7 +1301,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
         /// </summary>
         /// <param name="clientStats">Client statistics</param>
         /// <returns></returns>
-        private EFClientStatistics UpdateStats(EFClientStatistics clientStats)
+        private EFClientStatistics UpdateStats(EFClientStatistics clientStats, EFClient client)
         {
             // prevent NaN or inactive time lowering SPM
             if ((DateTime.UtcNow - clientStats.LastStatCalculation).TotalSeconds / 60.0 < 0.01 ||
@@ -1314,10 +1313,9 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                 return clientStats;
             }
 
-            double timeSinceLastCalc = (DateTime.UtcNow - clientStats.LastStatCalculation).TotalSeconds / 60.0;
-            double timeSinceLastActive = (DateTime.UtcNow - clientStats.LastActive).TotalSeconds / 60.0;
+            var timeSinceLastCalc = (DateTime.UtcNow - clientStats.LastStatCalculation).TotalSeconds / 60.0;
 
-            int scoreDifference = 0;
+            var scoreDifference = 0;
             // this means they've been tking or suicide and is the only time they can have a negative SPM
             if (clientStats.RoundScore < 0)
             {
@@ -1329,17 +1327,17 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
                 scoreDifference = clientStats.RoundScore - clientStats.LastScore;
             }
 
-            double killSPM = scoreDifference / timeSinceLastCalc;
-            double spmMultiplier = 2.934 *
+            var killSpm = scoreDifference / timeSinceLastCalc;
+            var spmMultiplier = 2.934 *
                                    Math.Pow(
                                        _servers[clientStats.ServerId]
                                            .TeamCount((IW4Info.Team) clientStats.Team == IW4Info.Team.Allies
                                                ? IW4Info.Team.Axis
                                                : IW4Info.Team.Allies), -0.454);
-            killSPM *= Math.Max(1, spmMultiplier);
+            killSpm *= Math.Max(1, spmMultiplier);
 
             // update this for ac tracking
-            clientStats.SessionSPM = killSPM;
+            clientStats.SessionSPM = clientStats.SessionScore / Math.Max(1, client.ConnectionLength / 60.0);
 
             // calculate how much the KDR should weigh
             // 1.637 is a Eddie-Generated number that weights the KDR nicely
@@ -1358,7 +1356,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
             double SPMAgainstPlayWeight = timeSinceLastCalc / Math.Min(600, (totalPlayTime / 60.0));
 
             // calculate the new weight against average times the weight against play time
-            clientStats.SPM = (killSPM * SPMAgainstPlayWeight) + (clientStats.SPM * (1 - SPMAgainstPlayWeight));
+            clientStats.SPM = (killSpm * SPMAgainstPlayWeight) + (clientStats.SPM * (1 - SPMAgainstPlayWeight));
 
             if (clientStats.SPM < 0)
             {
@@ -1373,7 +1371,7 @@ namespace IW4MAdmin.Plugins.Stats.Helpers
             if (double.IsNaN(clientStats.SPM) || double.IsNaN(clientStats.Skill))
             {
                 _log.LogWarning("clientStats SPM/Skill NaN {@killInfo}",
-                    new {killSPM, KDRWeight, totalPlayTime, SPMAgainstPlayWeight, clientStats, scoreDifference});
+                    new {killSPM = killSpm, KDRWeight, totalPlayTime, SPMAgainstPlayWeight, clientStats, scoreDifference});
                 clientStats.SPM = 0;
                 clientStats.Skill = 0;
             }

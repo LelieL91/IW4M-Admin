@@ -11,7 +11,7 @@ namespace SharedLibraryCore.Commands
 {
     public class CommandProcessing
     {
-        public static async Task<Command> ValidateCommand(GameEvent E, ApplicationConfiguration appConfig)
+        public static async Task<Command> ValidateCommand(GameEvent E, ApplicationConfiguration appConfig, CommandConfiguration commandConfig)
         {
             var loc = Utilities.CurrentLocalization.LocalizationIndex;
             var Manager = E.Owner.Manager;
@@ -40,7 +40,11 @@ namespace SharedLibraryCore.Commands
 
             C.IsBroadcast = isBroadcast;
 
-            if (!C.AllowImpersonation && E.ImpersonationOrigin != null)
+            var allowImpersonation = commandConfig?.Commands?.ContainsKey(C.GetType().Name) ?? false
+                ? commandConfig.Commands[C.GetType().Name].AllowImpersonation
+                : C.AllowImpersonation;
+            
+            if (!allowImpersonation && E.ImpersonationOrigin != null)
             {
                 E.ImpersonationOrigin.Tell(loc["COMMANDS_RUN_AS_FAIL"]);
                 throw new CommandException($"Command {C.Name} cannot be run as another client");
@@ -79,9 +83,10 @@ namespace SharedLibraryCore.Commands
                         var found = await Manager.GetClientService().Get(dbID);
                         if (found != null)
                         {
+                            found = Manager.FindActiveClient(found);
                             E.Target = found;
-                            E.Target.CurrentServer = E.Owner;
-                            E.Data = String.Join(" ", Args.Skip(1));
+                            E.Target.CurrentServer = found.CurrentServer ?? E.Owner;
+                            E.Data = string.Join(" ", Args.Skip(1));
                         }
                     }
 
@@ -131,7 +136,7 @@ namespace SharedLibraryCore.Commands
                         E.Origin.Tell(loc["COMMAND_TARGET_MULTI"]);
                         foreach (var p in matchingPlayers)
                         {
-                            E.Origin.Tell($"[^3{p.ClientNumber}^7] {p.Name}");
+                            E.Origin.Tell($"[(Color::Yellow){p.ClientNumber}(Color::White)] {p.Name}");
                         }
                         throw new CommandException($"{E.Origin} had multiple players found for {C.Name}");
                     }

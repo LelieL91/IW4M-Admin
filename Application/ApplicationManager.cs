@@ -15,6 +15,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -26,6 +27,7 @@ using IW4MAdmin.Application.Migration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog.Context;
+using SharedLibraryCore.Formatting;
 using static SharedLibraryCore.GameEvent;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 using ObsoleteLogger = SharedLibraryCore.Interfaces.ILogger;
@@ -217,6 +219,8 @@ namespace IW4MAdmin.Application
             return _commands;
         }
 
+        public IReadOnlyList<IManagerCommand> Commands => _commands.ToImmutableList();
+
         public async Task UpdateServerStates()
         {
             // store the server hash code and task for it
@@ -240,7 +244,7 @@ namespace IW4MAdmin.Application
                 }
 
                 // remove the update tasks as they have completed
-                foreach (var serverId in serverTasksToRemove)
+                foreach (var serverId in serverTasksToRemove.Where(serverId => runningUpdateTasks.ContainsKey(serverId)))
                 {
                     if (!runningUpdateTasks[serverId].tokenSource.Token.IsCancellationRequested)
                     {
@@ -259,7 +263,11 @@ namespace IW4MAdmin.Application
                     {
                         try
                         {
-                            await server.ProcessUpdatesAsync(_tokenSource.Token).WithWaitCancellation(runningUpdateTasks[server.EndPoint].tokenSource.Token);
+                            if (runningUpdateTasks.ContainsKey(server.EndPoint))
+                            {
+                                await server.ProcessUpdatesAsync(_tokenSource.Token)
+                                    .WithWaitCancellation(runningUpdateTasks[server.EndPoint].tokenSource.Token);
+                            }
                         }
 
                         catch (Exception e)
@@ -353,9 +361,7 @@ namespace IW4MAdmin.Application
 
                 _appConfig.AutoMessages = defaultConfig.AutoMessages;
                 _appConfig.GlobalRules = defaultConfig.GlobalRules;
-                _appConfig.Maps = defaultConfig.Maps;
                 _appConfig.DisallowedClientNames = defaultConfig.DisallowedClientNames;
-                _appConfig.QuickMessages = defaultConfig.QuickMessages;
 
                 //if (newConfig.Servers == null)
                 {
@@ -396,6 +402,18 @@ namespace IW4MAdmin.Application
                     await ConfigHandler.Save();
                 }
 
+#pragma warning disable 618
+                if (_appConfig.Maps != null)
+                {
+                    _appConfig.Maps = null;
+                }
+
+                if (_appConfig.QuickMessages != null)
+                {
+                    _appConfig.QuickMessages = null;
+                }
+#pragma warning restore 618
+
                 var validator = new ApplicationConfigurationValidator();
                 var validationResult = validator.Validate(_appConfig);
 
@@ -410,7 +428,7 @@ namespace IW4MAdmin.Application
 
                 foreach (var serverConfig in _appConfig.Servers)
                 {
-                    Migration.ConfigurationMigration.ModifyLogPath020919(serverConfig);
+                    ConfigurationMigration.ModifyLogPath020919(serverConfig);
 
                     if (serverConfig.RConParserVersion == null || serverConfig.EventParserVersion == null)
                     {
@@ -437,6 +455,17 @@ namespace IW4MAdmin.Application
 
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             Utilities.EncodingType = Encoding.GetEncoding(!string.IsNullOrEmpty(_appConfig.CustomParserEncoding) ? _appConfig.CustomParserEncoding : "windows-1252");
+
+            foreach (var parser in AdditionalRConParsers)
+            {
+                if (!parser.Configuration.ColorCodeMapping.ContainsKey(ColorCodes.Accent.ToString()))
+                {
+                    parser.Configuration.ColorCodeMapping.Add(ColorCodes.Accent.ToString(),
+                        parser.Configuration.ColorCodeMapping.TryGetValue(_appConfig.IngameAccentColorKey, out var colorCode)
+                            ? colorCode
+                            : "");
+                }
+            }
 
             #endregion
 
@@ -590,6 +619,11 @@ namespace IW4MAdmin.Application
             // we're adding another to list here so we don't get a collection modified exception..
             return _servers.SelectMany(s => s.Clients).ToList().Where(p => p != null).ToList();
         }
+
+        public EFClient FindActiveClient(EFClient client) =>client.ClientNumber < 0 ?
+                GetActiveClients()
+                    .FirstOrDefault(c => c.NetworkId == client.NetworkId) ?? client :
+                client;
 
         public ClientService GetClientService()
         {

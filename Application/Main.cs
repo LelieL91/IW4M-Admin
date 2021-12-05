@@ -19,6 +19,7 @@ using SharedLibraryCore.Services;
 using Stats.Dtos;
 using System;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -185,6 +186,8 @@ namespace IW4MAdmin.Application
                 ? WebfrontCore.Program.Init(ServerManager, serviceProvider, services, ServerManager.CancellationToken)
                 : Task.CompletedTask;
 
+            var collectionService = serviceProvider.GetRequiredService<IServerDataCollector>();
+
             // we want to run this one on a manual thread instead of letting the thread pool handle it,
             // because we can't exit early from waiting on console input, and it prevents us from restarting
             var inputThread = new Thread(async () => await ReadConsoleInput(logger));
@@ -195,7 +198,8 @@ namespace IW4MAdmin.Application
                 ServerManager.Start(),
                 webfrontTask,
                 serviceProvider.GetRequiredService<IMasterCommunication>()
-                    .RunUploadStatus(ServerManager.CancellationToken)
+                    .RunUploadStatus(ServerManager.CancellationToken),
+                collectionService.BeginCollectionAsync(cancellationToken: ServerManager.CancellationToken)
             };
 
             logger.LogDebug("Starting webfront and input tasks");
@@ -271,6 +275,7 @@ namespace IW4MAdmin.Application
 
             // register the native commands
             foreach (var commandType in typeof(SharedLibraryCore.Commands.QuitCommand).Assembly.GetTypes()
+                .Concat(typeof(Program).Assembly.GetTypes().Where(type => type.Namespace == "IW4MAdmin.Application.Commands"))
                 .Where(_command => _command.BaseType == typeof(Command)))
             {
                 defaultLogger.LogDebug("Registered native command type {name}", commandType.Name);
@@ -332,11 +337,18 @@ namespace IW4MAdmin.Application
             // setup the static resources (config/master api/translations)
             var serviceCollection = new ServiceCollection();
             var appConfigHandler = new BaseConfigurationHandler<ApplicationConfiguration>("IW4MAdminSettings");
+            var defaultConfigHandler = new BaseConfigurationHandler<DefaultSettings>("DefaultSettings");
+            var defaultConfig = defaultConfigHandler.Configuration();
             var appConfig = appConfigHandler.Configuration();
             var masterUri = Utilities.IsDevelopment
                 ? new Uri("http://127.0.0.1:8080")
                 : appConfig?.MasterUrl ?? new ApplicationConfiguration().MasterUrl;
-            var masterRestClient = RestClient.For<IMasterApi>(masterUri);
+            var httpClient = new HttpClient
+            {
+                BaseAddress = masterUri,
+                Timeout = TimeSpan.FromSeconds(15)
+            };
+            var masterRestClient = RestClient.For<IMasterApi>(httpClient);
             var translationLookup = Configure.Initialize(Utilities.DefaultLogger, masterRestClient, appConfig);
 
             if (appConfig == null)
@@ -360,6 +372,7 @@ namespace IW4MAdmin.Application
 
             serviceCollection
                 .AddBaseLogger(appConfig)
+                .AddSingleton(defaultConfig)
                 .AddSingleton<IServiceCollection>(_serviceProvider => serviceCollection)
                 .AddSingleton<IConfigurationHandler<DefaultSettings>, BaseConfigurationHandler<DefaultSettings>>()
                 .AddSingleton((IConfigurationHandler<ApplicationConfiguration>) appConfigHandler)
@@ -394,6 +407,7 @@ namespace IW4MAdmin.Application
                 .AddSingleton<IResourceQueryHelper<ClientPaginationRequest, UpdatedAliasResponse>,
                     UpdatedAliasResourceQueryHelper>()
                 .AddSingleton<IResourceQueryHelper<ChatSearchQuery, MessageResponse>, ChatResourceQueryHelper>()
+                .AddSingleton<IResourceQueryHelper<ClientPaginationRequest, ConnectionHistoryResponse>, ConnectionsResourceQueryHelper>()
                 .AddTransient<IParserPatternMatcher, ParserPatternMatcher>()
                 .AddSingleton<IRemoteAssemblyHandler, RemoteAssemblyHandler>()
                 .AddSingleton<IMasterCommunication, MasterCommunication>()
@@ -406,6 +420,9 @@ namespace IW4MAdmin.Application
                 .AddSingleton<IHitInfoBuilder, HitInfoBuilder>()
                 .AddSingleton(typeof(ILookupCache<>), typeof(LookupCache<>))
                 .AddSingleton(typeof(IDataValueCache<,>), typeof(DataValueCache<,>))
+                .AddSingleton<IServerDataViewer, ServerDataViewer>()
+                .AddSingleton<IServerDataCollector, ServerDataCollector>()
+                .AddSingleton<IEventPublisher, EventPublisher>()
                 .AddSingleton(translationLookup)
                 .AddDatabaseContextOptions(appConfig);
 

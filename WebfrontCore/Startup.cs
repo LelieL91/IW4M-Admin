@@ -26,6 +26,7 @@ using Data.Abstractions;
 using Data.Helpers;
 using IW4MAdmin.Plugins.Stats.Config;
 using Stats.Client.Abstractions;
+using Stats.Config;
 using WebfrontCore.Controllers.API.Validation;
 using WebfrontCore.Middleware;
 
@@ -113,6 +114,8 @@ namespace WebfrontCore
             services.AddSingleton<IResourceQueryHelper<StatsInfoRequest, AdvancedStatsInfo>, AdvancedClientStatsResourceQueryHelper>();
             services.AddSingleton(typeof(IDataValueCache<,>), typeof(DataValueCache<,>));
             // todo: this needs to be handled more gracefully
+            services.AddSingleton(Program.ApplicationServiceProvider.GetRequiredService<DefaultSettings>());
+            services.AddSingleton(Program.ApplicationServiceProvider.GetRequiredService<ILoggerFactory>());
             services.AddSingleton(Program.ApplicationServiceProvider.GetService<IConfigurationHandlerFactory>());
             services.AddSingleton(Program.ApplicationServiceProvider.GetService<IDatabaseContextFactory>());
             services.AddSingleton(Program.ApplicationServiceProvider.GetService<IAuditInformationRepository>());
@@ -127,6 +130,7 @@ namespace WebfrontCore
                 .GetRequiredService<IConfigurationHandler<DefaultSettings>>());
             services.AddSingleton(Program.ApplicationServiceProvider
                             .GetRequiredService<IConfigurationHandler<StatsConfiguration>>());
+            services.AddSingleton(Program.ApplicationServiceProvider.GetRequiredService<IServerDataViewer>());
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.

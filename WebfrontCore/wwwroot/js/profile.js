@@ -1,7 +1,7 @@
 ﻿$(document).ready(function () {
-	/*
-	Expand alias tab if they have any
-	*/
+    /*
+    Expand alias tab if they have any
+    */
     $('#profile_aliases_btn').click(function (e) {
         const aliases = $('#profile_aliases').text().trim();
         if (aliases && aliases.length !== 0) {
@@ -10,9 +10,29 @@
         }
     });
 
+    const ipAddresses = $('.ip-lookup-profile');
+    $.each(ipAddresses, function (index, address) {
+        let ip = $(address).data('ip');
+        if (ip.length === 0) {
+            return;
+        }
+        $.get('https://ip2c.org/' + ip, function (result) {
+            const countryCode = result.split(';')[1].toLowerCase();
+            const country = result.split(';')[3];
+
+            if (country === 'Unknown') {
+                return;
+            }
+            
+            $('#ip_lookup_country').text(country);
+            if (countryCode !== 'zz' && countryCode !== '') {
+                $(address).css('background-image', `url('https://flagcdn.com/w80/${countryCode}.png')`);
+            }
+        });
+    });
+
     /* set the end time for initial event query */
     startAt = $('.loader-data-time').last().data('time');
-
 
     $('#filter_meta_container_button').click(function () {
         $('#filter_meta_container').hide();
@@ -35,7 +55,7 @@
 
         $(this).children().filter('.client-message-prefix').removeClass('oi-chevron-right');
         $(this).children().filter('.client-message-prefix').addClass('oi-chevron-bottom');
-       
+
         $.get('/Stats/GetMessageAsync', {
             'serverId': $(this).data('serverid'),
             'when': $(this).data('when')
@@ -76,7 +96,7 @@
     $('.ip-locate-link').click(function (e) {
         e.preventDefault();
         const ip = $(this).data("ip");
-        $.getJSON('https://extreme-ip-lookup.com/json/' + ip)
+        $.getJSON('https://extreme-ip-lookup.com/json/' + ip + '?key=demo')
             .done(function (response) {
                 $('#mainModal .modal-title').text(ip);
                 $('#mainModal .modal-body').text('');
@@ -102,7 +122,7 @@
                     $('#mainModal .modal-body').append(response.city);
                 }
                 if (response.region.length > 0) {
-                    $('#mainModal .modal-body').append((response.city.length > 0  ? ', ' : '') + response.region);
+                    $('#mainModal .modal-body').append((response.city.length > 0 ? ', ' : '') + response.region);
                 }
                 if (response.country.length > 0) {
                     $('#mainModal .modal-body').append((response.country.length > 0 ? ', ' : '') + response.country);

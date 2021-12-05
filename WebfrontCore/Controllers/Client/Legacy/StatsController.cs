@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 using Data.Abstractions;
 using IW4MAdmin.Plugins.Stats.Config;
+using Stats.Config;
 
 namespace IW4MAdmin.Plugins.Web.StatsWeb.Controllers
 {
@@ -183,6 +184,7 @@ namespace IW4MAdmin.Plugins.Web.StatsWeb.Controllers
                 .Include(s => s.HitOrigin)
                 .Include(s => s.HitDestination)
                 .Include(s => s.CurrentViewAngle)
+                .Include(s => s.Server)
                 .Include(s => s.PredictedViewAngles)
                 .ThenInclude(_angles => _angles.Vector)
                 .OrderBy(s => s.When)

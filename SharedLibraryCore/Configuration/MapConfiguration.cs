@@ -1,16 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-using static SharedLibraryCore.Server;
-
-namespace SharedLibraryCore.Configuration
+﻿namespace SharedLibraryCore.Configuration
 {
     public class MapConfiguration
     {
-        public Game Game { get; set; }
-        public List<Map> Maps { get; set; }
+        public Server.Game Game { get; set; }
+        public Map[] Maps { get; set; }
     }
 }

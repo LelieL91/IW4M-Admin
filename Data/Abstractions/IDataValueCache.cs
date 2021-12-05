@@ -1,12 +1,14 @@
 ﻿using System;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 
 namespace Data.Abstractions
 {
-    public interface IDataValueCache<T, V> where T : class
+    public interface IDataValueCache<TEntityType, TReturnType> where TEntityType : class
     {
-        void SetCacheItem(Func<DbSet<T>, Task<V>> itemGetter, string keyName, TimeSpan? expirationTime = null);
-        Task<V> GetCacheItem(string keyName);
+        void SetCacheItem(Func<DbSet<TEntityType>, CancellationToken, Task<TReturnType>> itemGetter, string keyName,
+            TimeSpan? expirationTime = null, bool autoRefresh = false);
+        Task<TReturnType> GetCacheItem(string keyName, CancellationToken token = default);
     }
 }

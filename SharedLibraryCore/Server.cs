@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -12,11 +13,13 @@ using SharedLibraryCore.Interfaces;
 using SharedLibraryCore.Database.Models;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 using Data.Models;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace SharedLibraryCore
 {
     public abstract class Server : IGameServer
     {
+        protected readonly DefaultSettings DefaultSettings;
         public enum Game
         {
             COD = -1,
@@ -35,7 +38,7 @@ namespace SharedLibraryCore
 
         public Server(ILogger<Server> logger, SharedLibraryCore.Interfaces.ILogger deprecatedLogger, 
             ServerConfiguration config, IManager mgr, IRConConnectionFactory rconConnectionFactory, 
-            IGameLogReaderFactory gameLogReaderFactory)
+            IGameLogReaderFactory gameLogReaderFactory, IServiceProvider serviceProvider)
         {
             Password = config.Password;
             IP = config.IPAddress;
@@ -54,11 +57,14 @@ namespace SharedLibraryCore
             this.gameLogReaderFactory = gameLogReaderFactory;
             RConConnectionFactory = rconConnectionFactory;
             ServerLogger = logger;
+            DefaultSettings = serviceProvider.GetRequiredService<DefaultSettings>();
             InitializeTokens();
             InitializeAutoMessages();
         }
 
-        public long EndPoint => Convert.ToInt64($"{IP.Replace(".", "")}{Port}");
+        public long EndPoint => IPAddress.TryParse(IP, out _) 
+            ? Convert.ToInt64($"{IP.Replace(".", "")}{Port}") 
+            : $"{IP.Replace(".", "")}{Port}".GetStableHashCode();
 
         /// <summary>
         /// Returns list of all current players
@@ -129,10 +135,12 @@ namespace SharedLibraryCore
         /// <param name="message">Message to be sent to all players</param>
         public GameEvent Broadcast(string message, EFClient sender = null)
         {
-            string formattedMessage = string.Format(RconParser.Configuration.CommandPrefixes.Say ?? "", $"{(CustomSayEnabled && GameName == Game.IW4 ? $"{CustomSayName}: " : "")}{message.FixIW4ForwardSlash()}");
-            ServerLogger.LogDebug("All->" + message.StripColors());
+            var formattedMessage = string.Format(RconParser.Configuration.CommandPrefixes.Say ?? "",
+                $"{(CustomSayEnabled && GameName == Game.IW4 ? $"{CustomSayName}: " : "")}{message.FormatMessageForEngine(RconParser.Configuration.ColorCodeMapping)}");
+            ServerLogger.LogDebug("All-> {Message}",
+                message.FormatMessageForEngine(RconParser.Configuration.ColorCodeMapping).StripColors());
 
-            var e = new GameEvent()
+            var e = new GameEvent
             {
                 Type = GameEvent.EventType.Broadcast,
                 Data = formattedMessage,
@@ -162,6 +170,8 @@ namespace SharedLibraryCore
         /// <param name="targetClient">EFClient to send message to</param>
         protected async Task Tell(string message, EFClient targetClient)
         {
+            var engineMessage = message.FormatMessageForEngine(RconParser.Configuration.ColorCodeMapping);
+            
             if (!Utilities.IsDevelopment)
             {
                 var temporalClientId = targetClient.GetAdditionalProperty<string>("ConnectionClientId");
@@ -170,24 +180,25 @@ namespace SharedLibraryCore
 
                 var formattedMessage = string.Format(RconParser.Configuration.CommandPrefixes.Tell,
                     clientNumber,
-                    $"{(CustomSayEnabled && GameName == Game.IW4 ? $"{CustomSayName}: " : "")}{message.FixIW4ForwardSlash()}");
+                    $"{(CustomSayEnabled && GameName == Game.IW4 ? $"{CustomSayName}: " : "")}{engineMessage}");
                 if (targetClient.ClientNumber > -1 && message.Length > 0 && targetClient.Level != EFClient.Permission.Console)
                     await this.ExecuteCommandAsync(formattedMessage);
             }
             else
             {
-                ServerLogger.LogDebug("Tell[{clientNumber}]->{message}", targetClient.ClientNumber, message.StripColors());
+                ServerLogger.LogDebug("Tell[{ClientNumber}]->{Message}", targetClient.ClientNumber,
+                    message.FormatMessageForEngine(RconParser.Configuration.ColorCodeMapping).StripColors());
             }
-
 
             if (targetClient.Level == EFClient.Permission.Console)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 using (LogContext.PushProperty("Server", ToString()))
                 {
-                    ServerLogger.LogInformation("Command output received: {message}", message);
+                    ServerLogger.LogInformation("Command output received: {Message}",
+                        engineMessage.StripColors());
                 }
-                Console.WriteLine(message.StripColors());
+                Console.WriteLine(engineMessage.StripColors());
                 Console.ForegroundColor = ConsoleColor.Gray;
             }
         }
@@ -215,9 +226,9 @@ namespace SharedLibraryCore
         /// <summary>
         /// Temporarily ban a player ( default 1 hour ) from the server
         /// </summary>
-        /// <param name="Reason">Reason for banning the player</param>
+        /// <param name="reason">Reason for banning the player</param>
         /// <param name="Target">The player to ban</param>
-        abstract public Task TempBan(String Reason, TimeSpan length, EFClient Target, EFClient Origin);
+        abstract public Task TempBan(String reason, TimeSpan length, EFClient Target, EFClient Origin);
 
         /// <summary>
         /// Perm ban a player from the server
@@ -233,9 +244,9 @@ namespace SharedLibraryCore
         /// Unban a player by npID / GUID
         /// </summary>
         /// <param name="npID">npID of the player</param>
-        /// <param name="Target">I don't remember what this is for</param>
+        /// <param name="targetClient">I don't remember what this is for</param>
         /// <returns></returns>
-        abstract public Task Unban(string reason, EFClient Target, EFClient Origin);
+        abstract public Task Unban(string reason, EFClient targetClient, EFClient originClient);
 
         /// <summary>
         /// Change the current searver map
@@ -250,17 +261,6 @@ namespace SharedLibraryCore
         /// Initalize the macro variables
         /// </summary>
         abstract public void InitializeTokens();
-
-        /// <summary>
-        /// Read the map configuration
-        /// </summary>
-        protected void InitializeMaps()
-        {
-            Maps = new List<Map>();
-            var gameMaps = Manager.GetApplicationSettings().Configuration().Maps.FirstOrDefault(m => m.Game == GameName);
-            if (gameMaps != null)
-                Maps.AddRange(gameMaps.Maps);
-        }
 
         /// <summary>
         /// Initialize the messages to be broadcasted
@@ -292,6 +292,8 @@ namespace SharedLibraryCore
             }
         }
 
+        public abstract Task<long> GetIdForServer(Server server = null);
+
         // Objects
         public IManager Manager { get; protected set; }
         [Obsolete]
@@ -308,13 +310,15 @@ namespace SharedLibraryCore
         public string Hostname { get => ServerConfig.CustomHostname ?? hostname; protected set => hostname = value; }
         public string Website { get; protected set; }
         public string Gametype { get; set; }
+        public string GametypeName => DefaultSettings.Gametypes.FirstOrDefault(gt => gt.Game == GameName)?.Gametypes
+            ?.FirstOrDefault(gt => gt.Name == Gametype)?.Alias ?? Gametype;
         public string GamePassword { get; protected set; }
         public Map CurrentMap { get; set; }
         public int ClientNum
         {
             get
             {
-                return Clients.Where(p => p != null/* && !p.IsBot*/).Count();
+                return Clients.ToArray().Count(p => p != null && !p.IsBot);
             }
         }
         public int MaxClients { get; protected set; }
@@ -331,7 +335,11 @@ namespace SharedLibraryCore
         public SemaphoreSlim EventProcessing { get; private set; }
 
         // Internal
+        /// <summary>
+        /// this is actually the hostname now
+        /// </summary>
         public string IP { get; protected set; }
+        public IPEndPoint ResolvedIpEndPoint { get; protected set; }
         public string Version { get; protected set; }
         public bool IsInitialized { get; set; }
         protected readonly ILogger ServerLogger;
@@ -349,6 +357,6 @@ namespace SharedLibraryCore
 
         // only here for performance
         private readonly bool CustomSayEnabled;
-        private readonly string CustomSayName;
+        protected readonly string CustomSayName;
     }
 }

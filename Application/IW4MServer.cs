@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -22,6 +23,9 @@ using Serilog.Context;
 using static SharedLibraryCore.Database.Models.EFClient;
 using Data.Models;
 using Data.Models.Server;
+using IW4MAdmin.Application.Commands;
+using Microsoft.EntityFrameworkCore;
+using SharedLibraryCore.Formatting;
 using static Data.Models.Client.EFClient;
 
 namespace IW4MAdmin
@@ -39,9 +43,11 @@ namespace IW4MAdmin
         private readonly IServiceProvider _serviceProvider;
         private readonly IClientNoticeMessageFormatter _messageFormatter;
         private readonly ILookupCache<EFServer> _serverCache;
+        private readonly CommandConfiguration _commandConfiguration;
 
         public IW4MServer(
             ServerConfiguration serverConfiguration,
+            CommandConfiguration commandConfiguration,
             ITranslationLookup lookup,
             IMetaService metaService, 
             IServiceProvider serviceProvider,
@@ -51,13 +57,14 @@ namespace IW4MAdmin
             serverConfiguration,
             serviceProvider.GetRequiredService<IManager>(), 
             serviceProvider.GetRequiredService<IRConConnectionFactory>(),
-            serviceProvider.GetRequiredService<IGameLogReaderFactory>())
+            serviceProvider.GetRequiredService<IGameLogReaderFactory>(), serviceProvider)
         {
             _translationLookup = lookup;
             _metaService = metaService;
             _serviceProvider = serviceProvider;
             _messageFormatter = messageFormatter;
             _serverCache = serverCache;
+            _commandConfiguration = commandConfiguration;
         }
 
         public override async Task<EFClient> OnClientConnected(EFClient clientFromLog)
@@ -158,7 +165,7 @@ namespace IW4MAdmin
                     {
                         try
                         {
-                            C = await SharedLibraryCore.Commands.CommandProcessing.ValidateCommand(E, Manager.GetApplicationSettings().Configuration());
+                            C = await SharedLibraryCore.Commands.CommandProcessing.ValidateCommand(E, Manager.GetApplicationSettings().Configuration(), _commandConfiguration);
                         }
 
                         catch (CommandException e)
@@ -237,11 +244,11 @@ namespace IW4MAdmin
 
             try
             {
-                await (plugin.OnEventAsync(gameEvent, this)).WithWaitCancellation(tokenSource.Token);
+                await plugin.OnEventAsync(gameEvent, this).WithWaitCancellation(tokenSource.Token);
             }
             catch (Exception ex)
             {
-                Console.WriteLine(loc["SERVER_PLUGIN_ERROR"]);
+                Console.WriteLine(loc["SERVER_PLUGIN_ERROR"].FormatExt(plugin.Name, ex.GetType().Name));
                 ServerLogger.LogError(ex, "Could not execute {methodName} for plugin {plugin}", 
                     nameof(plugin.OnEventAsync), plugin.Name);
             }
@@ -305,6 +312,11 @@ namespace IW4MAdmin
                         Console.WriteLine(loc["MANAGER_CONNECTION_REST"].FormatExt($"[{IP}:{Port}]"));
                     }
 
+                    if (!string.IsNullOrEmpty(CustomSayName))
+                    {
+                        await this.SetDvarAsync("sv_sayname", CustomSayName);
+                    }
+
                     Throttled = false;
                 }
 
@@ -338,7 +350,26 @@ namespace IW4MAdmin
                             E.Origin.Tag = clientTag.LinkedMeta.Value;
                         }
 
-                        await E.Origin.OnJoin(E.Origin.IPAddress);
+                        try
+                        {
+                            var factory = _serviceProvider.GetRequiredService<IDatabaseContextFactory>();
+                            await using var context = factory.CreateContext();
+
+                            var messageCount = await context.InboxMessages
+                                .CountAsync(msg => msg.DestinationClientId == E.Origin.ClientId && !msg.IsDelivered);
+      
+                            if (messageCount > 0)
+                            {
+                                E.Origin.Tell(_translationLookup["SERVER_JOIN_OFFLINE_MESSAGES"]);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            ServerLogger.LogError(ex, "Could not get offline message count for {Client}", E.Origin.ToString());
+                            throw;
+                        }
+                        
+                        await E.Origin.OnJoin(E.Origin.IPAddress, Manager.GetApplicationSettings().Configuration().EnableImplicitAccountLinking);
                     }
                 }
 
@@ -404,7 +435,7 @@ namespace IW4MAdmin
 
                         if (E.Origin.Level > Permission.Moderator)
                         {
-                            E.Origin.Tell(string.Format(loc["SERVER_REPORT_COUNT"], E.Owner.Reports.Count));
+                            E.Origin.Tell(loc["SERVER_REPORT_COUNT_V2"].FormatExt(E.Owner.Reports.Count));
                         }
                     }
 
@@ -438,7 +469,7 @@ namespace IW4MAdmin
                         Link = E.Target.AliasLink
                     };
 
-                    var addedPenalty = await Manager.GetPenaltyService().Create(newPenalty);
+                    await Manager.GetPenaltyService().Create(newPenalty);
                     E.Target.SetLevel(Permission.Flagged, E.Origin);
                 }
 
@@ -590,7 +621,7 @@ namespace IW4MAdmin
                         {
                             try
                             {
-                                message = Manager.GetApplicationSettings().Configuration()
+                                message = _serviceProvider.GetRequiredService<DefaultSettings>()
                                     .QuickMessages
                                     .First(_qm => _qm.Game == GameName)
                                     .Messages[E.Data.Substring(1)];
@@ -696,11 +727,11 @@ namespace IW4MAdmin
 
         private async Task OnClientUpdate(EFClient origin)
         {
-            var client = GetClientsAsList().FirstOrDefault(_client => _client.Equals(origin));
+            var client = Manager.GetActiveClients().FirstOrDefault(c => c.NetworkId == origin.NetworkId);
 
             if (client == null)
             {
-                ServerLogger.LogWarning("{origin} expected to exist in client list for update, but they do not", origin.ToString());
+                ServerLogger.LogWarning("{Origin} expected to exist in client list for update, but they do not", origin.ToString());
                 return;
             }
 
@@ -714,7 +745,7 @@ namespace IW4MAdmin
             {
                 try
                 {
-                    await client.OnJoin(origin.IPAddress);
+                    await client.OnJoin(origin.IPAddress, Manager.GetApplicationSettings().Configuration().EnableImplicitAccountLinking);
                 }
 
                 catch (Exception e)
@@ -726,11 +757,11 @@ namespace IW4MAdmin
                 }
             }
 
-            else if ((client.IPAddress != null && client.State == ClientState.Disconnecting) ||
+            else if (client.IPAddress != null && client.State == ClientState.Disconnecting ||
                 client.Level == Permission.Banned)
             {
-                ServerLogger.LogWarning("{client} state is Unknown (probably kicked), but they are still connected. trying to kick again...", origin.ToString());
-                await client.CanConnect(client.IPAddress);
+                ServerLogger.LogWarning("{Client} state is Unknown (probably kicked), but they are still connected. trying to kick again...", origin.ToString());
+                await client.CanConnect(client.IPAddress, Manager.GetApplicationSettings().Configuration().EnableImplicitAccountLinking);
             }
         }
 
@@ -768,8 +799,10 @@ namespace IW4MAdmin
             };
         }
         
-        private async Task<long> GetIdForServer(Server server)
+        public override async Task<long> GetIdForServer(Server server = null)
         {
+            server ??= this;
+            
             if ($"{server.IP}:{server.Port.ToString()}" == "66.150.121.184:28965")
             {
                 return 886229536;
@@ -976,10 +1009,13 @@ namespace IW4MAdmin
                 LastMessage = DateTime.Now - start;
                 lastCount = DateTime.Now;
 
+                var appConfig = _serviceProvider.GetService<ApplicationConfiguration>();
                 // update the player history 
-                if ((lastCount - playerCountStart).TotalMinutes >= PlayerHistory.UpdateInterval)
+                if (lastCount - playerCountStart >= appConfig.ServerDataCollectionInterval)
                 {
-                    while (ClientHistory.Count > ((60 / PlayerHistory.UpdateInterval) * 12)) // 12 times a hour for 12 hours
+                    var maxItems = Math.Ceiling(appConfig.MaxClientHistoryTime.TotalMinutes /
+                                                appConfig.ServerDataCollectionInterval.TotalMinutes);
+                    while ( ClientHistory.Count > maxItems) 
                     {
                         ClientHistory.Dequeue();
                     }
@@ -1036,6 +1072,16 @@ namespace IW4MAdmin
 
         public async Task Initialize()
         {
+            try
+            {
+                ResolvedIpEndPoint = new IPEndPoint((await Dns.GetHostAddressesAsync(IP)).First(), Port);
+            }
+            catch (Exception ex)
+            {
+                ServerLogger.LogWarning(ex, "Could not resolve hostname or IP for RCon connection {IP}:{Port}", IP, Port);
+                ResolvedIpEndPoint = new IPEndPoint(IPAddress.Parse(IP), Port);
+            }
+            
             RconParser = Manager.AdditionalRConParsers
                 .FirstOrDefault(_parser => _parser.Version == ServerConfig.RConParserVersion);
 
@@ -1045,7 +1091,7 @@ namespace IW4MAdmin
             RconParser ??= Manager.AdditionalRConParsers[0];
             EventParser ??= Manager.AdditionalEventParsers[0];
 
-            RemoteConnection = RConConnectionFactory.CreateConnection(IP, Port, Password, RconParser.RConEngine);
+            RemoteConnection = RConConnectionFactory.CreateConnection(ResolvedIpEndPoint, Password, RconParser.RConEngine);
             RemoteConnection.SetConfiguration(RconParser);
 
             var version = await this.GetMappedDvarValueOrDefaultAsync<string>("version");
@@ -1078,8 +1124,9 @@ namespace IW4MAdmin
             string mapname = (await this.GetMappedDvarValueOrDefaultAsync<string>("mapname", infoResponse: infoResponse)).Value;
             int maxplayers = (await this.GetMappedDvarValueOrDefaultAsync<int>("sv_maxclients", infoResponse: infoResponse)).Value;
             string gametype = (await this.GetMappedDvarValueOrDefaultAsync<string>("g_gametype", "gametype", infoResponse)).Value;
-            var basepath = (await this.GetMappedDvarValueOrDefaultAsync<string>("fs_basepath"));
-            var basegame = (await this.GetMappedDvarValueOrDefaultAsync<string>("fs_basegame"));
+            var basepath = await this.GetMappedDvarValueOrDefaultAsync<string>("fs_basepath");
+            var basegame = await this.GetMappedDvarValueOrDefaultAsync<string>("fs_basegame");
+            var homepath = await this.GetMappedDvarValueOrDefaultAsync<string>("fs_homepath");
             var game = (await this.GetMappedDvarValueOrDefaultAsync<string>("fs_game", infoResponse: infoResponse));
             var logfile = await this.GetMappedDvarValueOrDefaultAsync<string>("g_log");
             var logsync = await this.GetMappedDvarValueOrDefaultAsync<int>("g_logsync");
@@ -1115,8 +1162,14 @@ namespace IW4MAdmin
             {
                 Manager.GetApplicationSettings().Configuration().ContactUri = Website;
             }
+            
+            var defaultConfig = _serviceProvider.GetRequiredService<DefaultSettings>();
+            var gameMaps = defaultConfig?.Maps?.FirstOrDefault(map => map.Game == GameName);
 
-            InitializeMaps();
+            if (gameMaps != null)
+            {
+                Maps.AddRange(gameMaps.Maps);
+            }
 
             WorkingDirectory = basepath.Value;
             this.Hostname = hostname;
@@ -1174,6 +1227,7 @@ namespace IW4MAdmin
                 {
                     BaseGameDirectory = basegame.Value,
                     BasePathDirectory = basepath.Value,
+                    HomePathDirectory = homepath.Value,
                     GameDirectory = EventParser.Configuration.GameDirectory ?? "",
                     ModDirectory = game.Value ?? "",
                     LogFile = logfile.Value,
@@ -1224,15 +1278,25 @@ namespace IW4MAdmin
         {
             string logPath;
             var workingDirectory = logInfo.BasePathDirectory;
+            
+            bool IsValidGamePath (string path)
+            {
+                var baseGameIsDirectory = !string.IsNullOrWhiteSpace(path) &&
+                                          path.IndexOfAny(Utilities.DirectorySeparatorChars) != -1;
 
-            var baseGameIsDirectory = !string.IsNullOrWhiteSpace(logInfo.BaseGameDirectory) &&
-                logInfo.BaseGameDirectory.IndexOfAny(Utilities.DirectorySeparatorChars) != -1;
+                var baseGameIsRelative = path.FixDirectoryCharacters()
+                    .Equals(logInfo.GameDirectory.FixDirectoryCharacters(), StringComparison.InvariantCultureIgnoreCase);
 
-            var baseGameIsRelative = logInfo.BaseGameDirectory.FixDirectoryCharacters()
-                .Equals(logInfo.GameDirectory.FixDirectoryCharacters(), StringComparison.InvariantCultureIgnoreCase);
+                return baseGameIsDirectory && !baseGameIsRelative;
+            }
 
             // we want to see if base game is provided and it 'looks' like a directory
-            if (baseGameIsDirectory && !baseGameIsRelative)
+            if (IsValidGamePath(logInfo.HomePathDirectory))
+            {
+                workingDirectory = logInfo.HomePathDirectory;
+            }
+            
+            else if (IsValidGamePath(logInfo.BaseGameDirectory))
             {
                 workingDirectory = logInfo.BaseGameDirectory;
             }
@@ -1259,12 +1323,9 @@ namespace IW4MAdmin
         public override async Task Warn(string reason, EFClient targetClient, EFClient targetOrigin)
         {
             // ensure player gets warned if command not performed on them in game
-            targetClient = targetClient.ClientNumber < 0 ?
-                Manager.GetActiveClients()
-                .FirstOrDefault(c => c.ClientId == targetClient?.ClientId) ?? targetClient :
-                targetClient;
+            var activeClient = Manager.FindActiveClient(targetClient);
 
-            var newPenalty = new EFPenalty()
+            var newPenalty = new EFPenalty
             {
                 Type = EFPenalty.PenaltyType.Warning,
                 Expires = DateTime.UtcNow,
@@ -1274,31 +1335,28 @@ namespace IW4MAdmin
                 Link = targetClient.AliasLink
             };
 
-            ServerLogger.LogDebug("Creating warn penalty for {targetClient}", targetClient.ToString());
+            ServerLogger.LogDebug("Creating warn penalty for {TargetClient}", targetClient.ToString());
             await newPenalty.TryCreatePenalty(Manager.GetPenaltyService(), ServerLogger);
 
-            if (targetClient.IsIngame)
+            if (activeClient.IsIngame)
             {
-                if (targetClient.Warnings >= 4)
+                if (activeClient.Warnings >= 4)
                 {
-                    targetClient.Kick(loc["SERVER_WARNLIMT_REACHED"], Utilities.IW4MAdminClient(this));
+                    activeClient.Kick(loc["SERVER_WARNLIMT_REACHED"], Utilities.IW4MAdminClient(this));
                     return;
                 }
 
-                // todo: move to translation sheet
-                string message = $"^1{loc["SERVER_WARNING"]} ^7[^3{targetClient.Warnings}^7]: ^3{targetClient.Name}^7, {reason}";
-                targetClient.CurrentServer.Broadcast(message);
+                var message = loc["COMMANDS_WARNING_FORMAT_V2"]
+                    .FormatExt(activeClient.Warnings, activeClient.Name, reason);
+                activeClient.CurrentServer.Broadcast(message);
             }
         }
 
         public override async Task Kick(string reason, EFClient targetClient, EFClient originClient, EFPenalty previousPenalty)
         {
-            targetClient = targetClient.ClientNumber < 0 ?
-                Manager.GetActiveClients()
-                .FirstOrDefault(c => c.ClientId == targetClient?.ClientId) ?? targetClient :
-                targetClient;
+            var activeClient = Manager.FindActiveClient(targetClient);
 
-            var newPenalty = new EFPenalty()
+            var newPenalty = new EFPenalty
             {
                 Type = EFPenalty.PenaltyType.Kick,
                 Expires = DateTime.UtcNow,
@@ -1308,77 +1366,64 @@ namespace IW4MAdmin
                 Link = targetClient.AliasLink
             };
 
-            ServerLogger.LogDebug("Creating kick penalty for {targetClient}", targetClient.ToString());
+            ServerLogger.LogDebug("Creating kick penalty for {TargetClient}", targetClient.ToString());
             await newPenalty.TryCreatePenalty(Manager.GetPenaltyService(), ServerLogger);
 
-            if (targetClient.IsIngame)
+            if (activeClient.IsIngame)
             {
-                var e = new GameEvent()
+                var gameEvent = new GameEvent
                 {
                     Type = GameEvent.EventType.PreDisconnect,
-                    Origin = targetClient,
+                    Origin = activeClient,
                     Owner = this
                 };
 
-                Manager.AddEvent(e);
-
-                var temporalClientId = targetClient.GetAdditionalProperty<string>("ConnectionClientId");
-                var parsedClientId = string.IsNullOrEmpty(temporalClientId) ? (int?)null : int.Parse(temporalClientId);
-                var clientNumber = parsedClientId ?? targetClient.ClientNumber;
+                Manager.AddEvent(gameEvent);
 
                 var formattedKick = string.Format(RconParser.Configuration.CommandPrefixes.Kick, 
-                    clientNumber, 
+                    activeClient.TemporalClientNumber, 
                     _messageFormatter.BuildFormattedMessage(RconParser.Configuration, 
                         newPenalty, 
                         previousPenalty));
-                await targetClient.CurrentServer.ExecuteCommandAsync(formattedKick);
+                ServerLogger.LogDebug("Executing tempban kick command for {ActiveClient}", activeClient.ToString());
+                await activeClient.CurrentServer.ExecuteCommandAsync(formattedKick);
             }
         }
 
-        public override async Task TempBan(string Reason, TimeSpan length, EFClient targetClient, EFClient originClient)
+        public override async Task TempBan(string reason, TimeSpan length, EFClient targetClient, EFClient originClient)
         {
             // ensure player gets kicked if command not performed on them in the same server
-            targetClient = targetClient.ClientNumber < 0 ?
-                Manager.GetActiveClients()
-                .FirstOrDefault(c => c.ClientId == targetClient?.ClientId) ?? targetClient :
-                targetClient;
+            var activeClient = Manager.FindActiveClient(targetClient);
 
-            var newPenalty = new EFPenalty()
+            var newPenalty = new EFPenalty
             {
                 Type = EFPenalty.PenaltyType.TempBan,
                 Expires = DateTime.UtcNow + length,
                 Offender = targetClient,
-                Offense = Reason,
+                Offense = reason,
                 Punisher = originClient,
                 Link = targetClient.AliasLink
             };
 
-            ServerLogger.LogDebug("Creating tempban penalty for {targetClient}", targetClient.ToString());
+            ServerLogger.LogDebug("Creating tempban penalty for {TargetClient}", targetClient.ToString());
             await newPenalty.TryCreatePenalty(Manager.GetPenaltyService(), ServerLogger);
 
-            if (targetClient.IsIngame)
+            if (activeClient.IsIngame)
             {
-                var temporalClientId = targetClient.GetAdditionalProperty<string>("ConnectionClientId");
-                var parsedClientId = string.IsNullOrEmpty(temporalClientId) ? (int?)null : int.Parse(temporalClientId);
-                var clientNumber = parsedClientId ?? targetClient.ClientNumber;
-                
                 var formattedKick = string.Format(RconParser.Configuration.CommandPrefixes.Kick,
-                    clientNumber,
+                    activeClient.TemporalClientNumber,
                     _messageFormatter.BuildFormattedMessage(RconParser.Configuration, newPenalty));
-                ServerLogger.LogDebug("Executing tempban kick command for {targetClient}", targetClient.ToString());
-                await targetClient.CurrentServer.ExecuteCommandAsync(formattedKick);
+                ServerLogger.LogDebug("Executing tempban kick command for {ActiveClient}", activeClient.ToString());
+                await activeClient.CurrentServer.ExecuteCommandAsync(formattedKick);
             }
         }
 
         public override async Task Ban(string reason, EFClient targetClient, EFClient originClient, bool isEvade = false)
         {
             // ensure player gets kicked if command not performed on them in the same server
-            targetClient = targetClient.ClientNumber < 0 ?
-                Manager.GetActiveClients()
-                .FirstOrDefault(c => c.ClientId == targetClient?.ClientId) ?? targetClient :
-                targetClient;
+            var activeClient = Manager.FindActiveClient(targetClient);
 
-            EFPenalty newPenalty = new EFPenalty()
+            var newPenalty = new EFPenalty
             {
                 Type = EFPenalty.PenaltyType.Ban,
                 Expires = null,
@@ -1389,51 +1434,47 @@ namespace IW4MAdmin
                 IsEvadedOffense = isEvade
             };
 
-            ServerLogger.LogDebug("Creating ban penalty for {targetClient}", targetClient.ToString());
-            targetClient.SetLevel(Permission.Banned, originClient);
+            ServerLogger.LogDebug("Creating ban penalty for {TargetClient}", targetClient.ToString());
+            activeClient.SetLevel(Permission.Banned, originClient);
             await newPenalty.TryCreatePenalty(Manager.GetPenaltyService(), ServerLogger);
 
-            if (targetClient.IsIngame)
+            if (activeClient.IsIngame)
             {
-                ServerLogger.LogDebug("Attempting to kicking newly banned client {targetClient}", targetClient.ToString());
-                
-                var temporalClientId = targetClient.GetAdditionalProperty<string>("ConnectionClientId");
-                var parsedClientId = string.IsNullOrEmpty(temporalClientId) ? (int?)null : int.Parse(temporalClientId);
-                var clientNumber = parsedClientId ?? targetClient.ClientNumber;
+                ServerLogger.LogDebug("Attempting to kicking newly banned client {ActiveClient}", activeClient.ToString());
                 
                 var formattedString = string.Format(RconParser.Configuration.CommandPrefixes.Kick, 
-                    clientNumber, 
+                    activeClient.TemporalClientNumber, 
                     _messageFormatter.BuildFormattedMessage(RconParser.Configuration, newPenalty));
-                await targetClient.CurrentServer.ExecuteCommandAsync(formattedString);
+                await activeClient.CurrentServer.ExecuteCommandAsync(formattedString);
             }
         }
 
-        override public async Task Unban(string reason, EFClient Target, EFClient Origin)
+        public override async Task Unban(string reason, EFClient targetClient, EFClient originClient)
         {
-            var unbanPenalty = new EFPenalty()
+            var unbanPenalty = new EFPenalty
             {
                 Type = EFPenalty.PenaltyType.Unban,
                 Expires = DateTime.Now,
-                Offender = Target,
+                Offender = targetClient,
                 Offense = reason,
-                Punisher = Origin,
+                Punisher = originClient,
                 When = DateTime.UtcNow,
                 Active = true,
-                Link = Target.AliasLink
+                Link = targetClient.AliasLink
             };
 
-            ServerLogger.LogDebug("Creating unban penalty for {targetClient}", Target.ToString());
-            Target.SetLevel(Permission.User, Origin);
-            await Manager.GetPenaltyService().RemoveActivePenalties(Target.AliasLink.AliasLinkId);
+            ServerLogger.LogDebug("Creating unban penalty for {targetClient}", targetClient.ToString());
+            targetClient.SetLevel(Permission.User, originClient);
+            await Manager.GetPenaltyService().RemoveActivePenalties(targetClient.AliasLink.AliasLinkId);
             await Manager.GetPenaltyService().Create(unbanPenalty);
         }
 
-        override public void InitializeTokens()
+        public override void InitializeTokens()
         {
             Manager.GetMessageTokens().Add(new MessageToken("TOTALPLAYERS", (Server s) => Task.Run(async () => (await Manager.GetClientService().GetTotalClientsAsync()).ToString())));
             Manager.GetMessageTokens().Add(new MessageToken("VERSION", (Server s) => Task.FromResult(Application.Program.Version.ToString())));
             Manager.GetMessageTokens().Add(new MessageToken("NEXTMAP", (Server s) => SharedLibraryCore.Commands.NextMapCommand.GetNextMap(s, _translationLookup)));
-            Manager.GetMessageTokens().Add(new MessageToken("ADMINS", (Server s) => Task.FromResult(SharedLibraryCore.Commands.ListAdminsCommand.OnlineAdmins(s, _translationLookup))));
+            Manager.GetMessageTokens().Add(new MessageToken("ADMINS", (Server s) => Task.FromResult(ListAdminsCommand.OnlineAdmins(s, _translationLookup))));
         }
     }
 }

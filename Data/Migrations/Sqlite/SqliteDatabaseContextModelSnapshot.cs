@@ -94,6 +94,38 @@ namespace Data.Migrations.Sqlite
                     b.ToTable("EFClients");
                 });
 
+            modelBuilder.Entity("Data.Models.Client.EFClientConnectionHistory", b =>
+                {
+                    b.Property<long>("ClientConnectionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ClientId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ConnectionType")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedDateTime")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ServerId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("UpdatedDateTime")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ClientConnectionId");
+
+                    b.HasIndex("ClientId");
+
+                    b.HasIndex("CreatedDateTime");
+
+                    b.HasIndex("ServerId");
+
+                    b.ToTable("EFClientConnectionHistory");
+                });
+
             modelBuilder.Entity("Data.Models.Client.EFClientKill", b =>
                 {
                     b.Property<long>("KillId")
@@ -144,6 +176,9 @@ namespace Data.Migrations.Sqlite
 
                     b.Property<int>("Weapon")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("WeaponReference")
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("When")
                         .HasColumnType("TEXT");
@@ -236,6 +271,9 @@ namespace Data.Migrations.Sqlite
                     b.Property<int>("HitLocation")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("HitLocationReference")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("HitOriginId")
                         .HasColumnType("INTEGER");
 
@@ -253,6 +291,9 @@ namespace Data.Migrations.Sqlite
 
                     b.Property<double>("RecoilOffset")
                         .HasColumnType("REAL");
+
+                    b.Property<long?>("ServerId")
+                        .HasColumnType("INTEGER");
 
                     b.Property<double>("SessionAngleOffset")
                         .HasColumnType("REAL");
@@ -278,6 +319,9 @@ namespace Data.Migrations.Sqlite
                     b.Property<int>("WeaponId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("WeaponReference")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("When")
                         .HasColumnType("TEXT");
 
@@ -292,6 +336,8 @@ namespace Data.Migrations.Sqlite
                     b.HasIndex("HitOriginId");
 
                     b.HasIndex("LastStrainAngleId");
+
+                    b.HasIndex("ServerId");
 
                     b.ToTable("EFACSnapshot");
                 });
@@ -920,6 +966,44 @@ namespace Data.Migrations.Sqlite
                     b.ToTable("EFPenalties");
                 });
 
+            modelBuilder.Entity("Data.Models.Misc.EFInboxMessage", b =>
+                {
+                    b.Property<int>("InboxMessageId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedDateTime")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("DestinationClientId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsDelivered")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Message")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ServerId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SourceClientId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("UpdatedDateTime")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("InboxMessageId");
+
+                    b.HasIndex("DestinationClientId");
+
+                    b.HasIndex("ServerId");
+
+                    b.HasIndex("SourceClientId");
+
+                    b.ToTable("InboxMessages");
+                });
+
             modelBuilder.Entity("Data.Models.Server.EFServer", b =>
                 {
                     b.Property<long>("ServerId")
@@ -946,6 +1030,39 @@ namespace Data.Migrations.Sqlite
                     b.HasKey("ServerId");
 
                     b.ToTable("EFServers");
+                });
+
+            modelBuilder.Entity("Data.Models.Server.EFServerSnapshot", b =>
+                {
+                    b.Property<long>("ServerSnapshotId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Active")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CapturedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ClientCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("MapId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("PeriodBlock")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ServerId")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("ServerSnapshotId");
+
+                    b.HasIndex("MapId");
+
+                    b.HasIndex("ServerId");
+
+                    b.ToTable("EFServerSnapshot");
                 });
 
             modelBuilder.Entity("Data.Models.Server.EFServerStatistics", b =>
@@ -1019,6 +1136,21 @@ namespace Data.Migrations.Sqlite
                     b.HasOne("Data.Models.EFAlias", "CurrentAlias")
                         .WithMany()
                         .HasForeignKey("CurrentAliasId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Data.Models.Client.EFClientConnectionHistory", b =>
+                {
+                    b.HasOne("Data.Models.Client.EFClient", "Client")
+                        .WithMany()
+                        .HasForeignKey("ClientId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Data.Models.Server.EFServer", "Server")
+                        .WithMany()
+                        .HasForeignKey("ServerId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -1102,6 +1234,10 @@ namespace Data.Migrations.Sqlite
                         .HasForeignKey("LastStrainAngleId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.HasOne("Data.Models.Server.EFServer", "Server")
+                        .WithMany()
+                        .HasForeignKey("ServerId");
                 });
 
             modelBuilder.Entity("Data.Models.Client.Stats.EFClientHitStatistic", b =>
@@ -1260,6 +1396,40 @@ namespace Data.Migrations.Sqlite
                         .WithMany("AdministeredPenalties")
                         .HasForeignKey("PunisherId")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Data.Models.Misc.EFInboxMessage", b =>
+                {
+                    b.HasOne("Data.Models.Client.EFClient", "DestinationClient")
+                        .WithMany()
+                        .HasForeignKey("DestinationClientId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Data.Models.Server.EFServer", "Server")
+                        .WithMany()
+                        .HasForeignKey("ServerId");
+
+                    b.HasOne("Data.Models.Client.EFClient", "SourceClient")
+                        .WithMany()
+                        .HasForeignKey("SourceClientId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Data.Models.Server.EFServerSnapshot", b =>
+                {
+                    b.HasOne("Data.Models.Client.Stats.Reference.EFMap", "Map")
+                        .WithMany()
+                        .HasForeignKey("MapId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Data.Models.Server.EFServer", "Server")
+                        .WithMany()
+                        .HasForeignKey("ServerId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

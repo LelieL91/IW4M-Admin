@@ -100,8 +100,9 @@ namespace SharedLibraryCore.Database.Models
                 CorrelationId = CurrentServer.Manager.ProcessingEvents.Values
                     .FirstOrDefault(ev => ev.Type == GameEvent.EventType.Command && (ev.Origin?.ClientId == ClientId || ev.ImpersonationOrigin?.ClientId == ClientId))?.CorrelationId ?? Guid.NewGuid()
             };
-            
-            e.Output.Add(message.StripColors());
+
+            e.Output.Add(message.FormatMessageForEngine(CurrentServer?.RconParser.Configuration.ColorCodeMapping)
+                .StripColors());
 
             CurrentServer?.Manager.AddEvent(e);
             return e;
@@ -457,9 +458,11 @@ namespace SharedLibraryCore.Database.Models
 
             using (LogContext.PushProperty("Server", CurrentServer?.ToString()))
             {
-                if (string.IsNullOrWhiteSpace(Name) || CleanedName.Replace(" ", "").Length < 3)
+                var nameToCheck = CurrentServer.IsCodGame() ? CleanedName : Name;
+                if (string.IsNullOrWhiteSpace(Name) || nameToCheck.Replace(" ", "").Length <
+                    (CurrentServer?.Manager?.GetApplicationSettings()?.Configuration()?.MinimumNameLength ?? 3))
                 {
-                    Utilities.DefaultLogger.LogInformation("Kicking {client} because their name is too short", ToString());
+                    Utilities.DefaultLogger.LogInformation("Kicking {Client} because their name is too short", ToString());
                     Kick(loc["SERVER_KICK_MINNAME"], Utilities.IW4MAdminClient(CurrentServer));
                     return false;
                 }
@@ -468,14 +471,14 @@ namespace SharedLibraryCore.Database.Models
                     .DisallowedClientNames
                     ?.Any(_name => Regex.IsMatch(Name, _name)) ?? false)
                 {
-                    Utilities.DefaultLogger.LogInformation("Kicking {client} because their name is not allowed", ToString());
+                    Utilities.DefaultLogger.LogInformation("Kicking {Client} because their name is not allowed", ToString());
                     Kick(loc["SERVER_KICK_GENERICNAME"], Utilities.IW4MAdminClient(CurrentServer));
                     return false;
                 }
 
                 if (Name.Where(c => char.IsControl(c)).Count() > 0)
                 {
-                    Utilities.DefaultLogger.LogInformation("Kicking {client} because their name contains control characters", ToString());
+                    Utilities.DefaultLogger.LogInformation("Kicking {Client} because their name contains control characters", ToString());
                     Kick(loc["SERVER_KICK_CONTROLCHARS"], Utilities.IW4MAdminClient(CurrentServer));
                     return false;
                 }
@@ -487,7 +490,7 @@ namespace SharedLibraryCore.Database.Models
                 CurrentServer.GetClientsAsList().Count <= CurrentServer.MaxClients &&
                 CurrentServer.MaxClients != 0)
                 {
-                    Utilities.DefaultLogger.LogInformation("Kicking {client} their spot is reserved", ToString());
+                    Utilities.DefaultLogger.LogInformation("Kicking {Client} their spot is reserved", ToString());
                     Kick(loc["SERVER_KICK_SLOT_IS_RESERVED"], Utilities.IW4MAdminClient(CurrentServer));
                     return false;
                 }
@@ -523,12 +526,12 @@ namespace SharedLibraryCore.Database.Models
             }
         }
 
-        public async Task OnJoin(int? ipAddress)
+        public async Task OnJoin(int? ipAddress, bool enableImplicitLinking)
         {
             using (LogContext.PushProperty("Server", CurrentServer?.ToString()))
             {
                 Utilities.DefaultLogger.LogInformation("Client {client} is joining the game from {source}", ToString(), ipAddress.HasValue ? "Status" : "Log");
-
+                
                 if (ipAddress != null)
                 {
                     IPAddress = ipAddress;
@@ -536,7 +539,7 @@ namespace SharedLibraryCore.Database.Models
                     await CurrentServer.Manager.GetClientService().UpdateAlias(this);
                     await CurrentServer.Manager.GetClientService().Update(this);
 
-                    bool canConnect = await CanConnect(ipAddress);
+                    var canConnect = await CanConnect(ipAddress, enableImplicitLinking);
 
                     if (!canConnect)
                     {
@@ -568,7 +571,7 @@ namespace SharedLibraryCore.Database.Models
             }
         }
 
-        public async Task<bool> CanConnect(int? ipAddress)
+        public async Task<bool> CanConnect(int? ipAddress, bool enableImplicitLinking)
         {
             using (LogContext.PushProperty("Server", CurrentServer?.ToString()))
             {
@@ -596,12 +599,12 @@ namespace SharedLibraryCore.Database.Models
                     if (Level != Permission.Banned)
                     {
                         Utilities.DefaultLogger.LogInformation(
-                            "Client {client} is banned, but using a new GUID, we we're updating their level and kicking them",
+                            "Client {client} has a ban penalty, but they're using a new GUID, we we're updating their level and kicking them",
                             ToString());
                         await SetLevel(Permission.Banned, autoKickClient).WaitAsync(Utilities.DefaultCommandTimeout,
                             CurrentServer.Manager.CancellationToken);
                     }
-
+                    
                     Utilities.DefaultLogger.LogInformation("Kicking {client} because they are banned", ToString());
                     Kick(loc["WEBFRONT_PENALTY_LIST_BANNED_REASON"], autoKickClient, banPenalty);
                     return false;
@@ -679,6 +682,17 @@ namespace SharedLibraryCore.Database.Models
         {
             get => GetAdditionalProperty<string>(EFMeta.ClientTag);
             set => SetAdditionalProperty(EFMeta.ClientTag, value);
+        }
+
+        [NotMapped]
+        public int TemporalClientNumber
+        {
+            get
+            {
+                var temporalClientId = GetAdditionalProperty<string>("ConnectionClientId");
+                var parsedClientId = string.IsNullOrEmpty(temporalClientId) ? (int?) null : int.Parse(temporalClientId);
+                return parsedClientId ?? ClientNumber;
+            }
         }
 
         [NotMapped]

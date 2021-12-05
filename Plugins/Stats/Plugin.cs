@@ -20,6 +20,7 @@ using Microsoft.Extensions.Logging;
 using SharedLibraryCore.Commands;
 using IW4MAdmin.Plugins.Stats.Client.Abstractions;
 using Stats.Client.Abstractions;
+using Stats.Config;
 using EFClient = SharedLibraryCore.Database.Models.EFClient;
 
 namespace IW4MAdmin.Plugins.Stats
@@ -83,11 +84,12 @@ namespace IW4MAdmin.Plugins.Stats
                     await Manager.Sync(S);
                     break;
                 case GameEvent.EventType.MapEnd:
+                    Manager.ResetKillstreaks(S);
                     await Manager.Sync(S);
                     break;
                 case GameEvent.EventType.Command:
                     var shouldPersist = !string.IsNullOrEmpty(E.Data) &&
-                                        E.Extra is SayCommand;
+                                        E.Extra?.GetType().Name == "SayCommand";
                     if (shouldPersist)
                     {
                         await Manager.AddMessageAsync(E.Origin.ClientId, StatManager.GetIdForServer(S), false, E.Data);

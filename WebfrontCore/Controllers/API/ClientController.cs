@@ -119,6 +119,16 @@ namespace WebfrontCore.Controllers.API
                     var claimsIdentity = new ClaimsIdentity(claims, "login");
                     var claimsPrinciple = new ClaimsPrincipal(claimsIdentity);
                     await SignInAsync(claimsPrinciple);
+                    
+                    Manager.AddEvent(new GameEvent()
+                    {
+                        Origin = privilegedClient,
+                        Type = GameEvent.EventType.Login,
+                        Owner = Manager.GetServers().First(),
+                        Data = HttpContext.Request.Headers.ContainsKey("X-Forwarded-For") 
+                            ? HttpContext.Request.Headers["X-Forwarded-For"].ToString() 
+                            : HttpContext.Connection.RemoteIpAddress.ToString()
+                    });
 
                     return Ok();
                 }
@@ -137,6 +147,19 @@ namespace WebfrontCore.Controllers.API
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> LogoutAsync()
         {
+            if (Authorized)
+            {
+                Manager.AddEvent(new GameEvent()
+                {
+                    Origin = Client,
+                    Type = GameEvent.EventType.Logout,
+                    Owner = Manager.GetServers().First(),
+                    Data = HttpContext.Request.Headers.ContainsKey("X-Forwarded-For") 
+                        ? HttpContext.Request.Headers["X-Forwarded-For"].ToString() 
+                        : HttpContext.Connection.RemoteIpAddress.ToString()
+                });
+            }
+            
             await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
 
             return Ok();

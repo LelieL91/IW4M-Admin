@@ -3,7 +3,7 @@ var eventParser;
 
 var plugin = {
     author: 'RaidMax',
-    version: 0.3,
+    version: 0.4,
     name: 'Black Ops 3 Parser',
     isParser: true,
 
@@ -27,12 +27,14 @@ var plugin = {
         rconParser.Configuration.MapStatus.Pattern              = 'Map: (.+)';
         rconParser.Configuration.CommandPrefixes.RConGetInfo    = undefined; // disables this, because it's useless on T7
         rconParser.Configuration.ServerNotRunningResponse       = 'this is here to prevent a hibernating server from being detected as not running';
+        rconParser.Configuration.DefaultRConPort = 27016;
 
         rconParser.Configuration.OverrideDvarNameMapping.Add('sv_hostname', 'live_steam_server_name');
         rconParser.Configuration.DefaultDvarValues.Add('sv_running', '1');
         rconParser.Configuration.DefaultDvarValues.Add('g_gametype', '');
         rconParser.Configuration.DefaultDvarValues.Add('fs_basepath', '');
         rconParser.Configuration.DefaultDvarValues.Add('fs_basegame', '');
+        rconParser.Configuration.DefaultDvarValues.Add('fs_homepath', '');
         rconParser.Configuration.DefaultDvarValues.Add('fs_game', '');
 
         rconParser.Configuration.Status.AddMapping(105, 6); // ip address
